@@ -1,0 +1,2 @@
+# spielplaner
+App zur Spielplanung
