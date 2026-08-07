@@ -166,6 +166,7 @@ def apply_brand_theme() -> None:
         [data-testid="stSidebarNav"] a {
             border-radius: var(--brand-button-radius);
             color: var(--brand-heading);
+            font-family: var(--brand-font) !important;
             font-weight: 700;
             padding: 0.55rem 0.8rem;
         }
@@ -194,6 +195,7 @@ def apply_brand_theme() -> None:
 
         p, label, [data-testid="stCaptionContainer"] {
             color: var(--brand-text);
+            font-family: var(--brand-font) !important;
         }
 
         [data-testid="stCaptionContainer"] {
@@ -201,10 +203,6 @@ def apply_brand_theme() -> None:
         }
 
         .spielplaner-masthead {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr);
-            align-items: center;
-            gap: 1rem;
             margin: 0 0 2rem;
             padding: 1rem 1.15rem;
             background: var(--brand-surface);
@@ -214,16 +212,10 @@ def apply_brand_theme() -> None:
             box-shadow: var(--brand-shadow);
         }
 
-        .spielplaner-masthead img {
-            display: block;
-            width: 4.25rem;
-            height: 4.25rem;
-            object-fit: contain;
-        }
-
         .spielplaner-masthead__club {
             margin: 0 0 0.1rem;
             color: var(--brand-blue);
+            font-family: var(--brand-font) !important;
             font-size: 0.82rem;
             font-weight: 800;
             letter-spacing: 0.045em;
@@ -239,6 +231,7 @@ def apply_brand_theme() -> None:
         .spielplaner-masthead__meta {
             margin: 0.35rem 0 0;
             color: var(--brand-muted);
+            font-family: var(--brand-font) !important;
             font-size: 0.95rem;
         }
 
@@ -302,6 +295,7 @@ def apply_brand_theme() -> None:
         div[data-baseweb="input"] > div,
         [data-testid="stNumberInput"] input {
             border-radius: var(--brand-card-radius) !important;
+            font-family: var(--brand-font) !important;
         }
 
         a:focus-visible, button:focus-visible, input:focus-visible {
@@ -315,14 +309,7 @@ def apply_brand_theme() -> None:
             }
 
             .spielplaner-masthead {
-                grid-template-columns: auto minmax(0, 1fr);
-                gap: 0.75rem;
                 padding: 0.85rem;
-            }
-
-            .spielplaner-masthead img {
-                width: 3.5rem;
-                height: 3.5rem;
             }
 
         }
@@ -333,18 +320,14 @@ def apply_brand_theme() -> None:
 
 
 def show_brand_header() -> None:
-    logo = asset_data_uri(BRAND_LOGO, "image/webp")
     st.markdown(
-        f"""
+        """
         <div class="spielplaner-masthead">
-            <img src="{logo}" alt="TSV Weilheim Handball">
-            <div>
-                <p class="spielplaner-masthead__club">TSV Weilheim Handball</p>
-                <h1>Spielplaner</h1>
-                <p class="spielplaner-masthead__meta">
-                    TSV Weilheim und weibliche A-Jugend des BSC Oberhausen, Saison 2026/27
-                </p>
-            </div>
+            <p class="spielplaner-masthead__club">TSV Weilheim Handball</p>
+            <h1>Spielplaner</h1>
+            <p class="spielplaner-masthead__meta">
+                TSV Weilheim und weibliche A-Jugend des BSC Oberhausen, Saison 2026/27
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -765,7 +748,7 @@ def show_pair_page() -> None:
 
 st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="wide")
 apply_brand_theme()
-st.logo(str(BRAND_LOGO))
+st.logo(str(BRAND_LOGO), size="large")
 page = st.navigation(
     [
         st.Page(
