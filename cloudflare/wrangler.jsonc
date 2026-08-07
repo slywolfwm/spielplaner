@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "spielplaner-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-07",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "spielplaner.handamball.de",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "UPSTREAM_ORIGIN": "https://spielplaner-handamball.streamlit.app"
+  }
+}

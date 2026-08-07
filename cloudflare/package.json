@@ -1,0 +1,13 @@
+{
+  "name": "spielplaner-cloudflare-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test test/index.test.js",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

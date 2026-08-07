@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+
+VIEWER_ROLE = "Pairings.Viewer"
+EDITOR_ROLE = "Pairings.Editor"
+ROLE_CLAIM = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
+
+
+@dataclass(frozen=True)
+class UserAccess:
+    authenticated: bool = False
+    display_name: str = ""
+    object_id: str = ""
+    roles: frozenset[str] = frozenset()
+
+    @property
+    def can_view_pairings(self) -> bool:
+        return EDITOR_ROLE in self.roles or VIEWER_ROLE in self.roles
+
+    @property
+    def can_edit_pairings(self) -> bool:
+        return EDITOR_ROLE in self.roles
+
+
+def parse_client_principal(encoded_principal: str | None) -> UserAccess:
+    if not encoded_principal:
+        return UserAccess()
+
+    try:
+        padding = "=" * (-len(encoded_principal) % 4)
+        payload = json.loads(base64.b64decode(encoded_principal + padding))
+        claims = payload.get("claims", [])
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return UserAccess()
+
+    values: dict[str, list[str]] = {}
+    for claim in claims:
+        claim_type = str(claim.get("typ", ""))
+        claim_value = str(claim.get("val", ""))
+        if claim_type and claim_value:
+            values.setdefault(claim_type, []).append(claim_value)
+
+    role_type = str(payload.get("role_typ", ROLE_CLAIM))
+    roles = set(values.get(role_type, []))
+    roles.update(values.get("roles", []))
+    roles.update(values.get("role", []))
+
+    display_name = _first_claim(
+        values,
+        "preferred_username",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        "name",
+    )
+    object_id = _first_claim(
+        values,
+        "http://schemas.microsoft.com/identity/claims/objectidentifier",
+        "oid",
+    )
+    return UserAccess(True, display_name, object_id, frozenset(roles))
+
+
+def parse_oidc_user(user: Mapping[str, object] | None) -> UserAccess:
+    if not user or not bool(user.get("is_logged_in")):
+        return UserAccess()
+
+    roles = set()
+    for claim_type in (ROLE_CLAIM, "roles", "role"):
+        roles.update(_claim_values(user.get(claim_type)))
+
+    display_name = _first_mapping_value(
+        user,
+        "preferred_username",
+        "email",
+        "name",
+    )
+    object_id = _first_mapping_value(user, "oid", "sub")
+    return UserAccess(True, display_name, object_id, frozenset(roles))
+
+
+def _first_claim(values: dict[str, list[str]], *claim_types: str) -> str:
+    for claim_type in claim_types:
+        matches = values.get(claim_type)
+        if matches:
+            return matches[0]
+    return ""
+
+
+def _claim_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(item) for item in value if item]
+    return []
+
+
+def _first_mapping_value(values: Mapping[str, object], *claim_types: str) -> str:
+    for claim_type in claim_types:
+        value = values.get(claim_type)
+        if isinstance(value, str) and value:
+            return value
+    return ""
