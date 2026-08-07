@@ -85,6 +85,11 @@ def asset_data_uri(path: Path, media_type: str) -> str:
     return f"data:{media_type};base64,{encoded}"
 
 
+def concise_team_label(label: str) -> str:
+    name, separator, suffix = label.rpartition(" (")
+    return name if separator and suffix.endswith(")") else label
+
+
 def apply_brand_theme() -> None:
     medium_font = asset_data_uri(BRAND_FONT_MEDIUM, "font/ttf")
     demi_font = asset_data_uri(BRAND_FONT_DEMI, "font/ttf")
@@ -557,7 +562,8 @@ def show_duration_page() -> None:
 
     rows = [
         {
-            "Mannschaft": team.label,
+            "TeamKey": team.key,
+            "Mannschaft": concise_team_label(team.label),
             "Regeldauer inkl. Halbzeit (Min.)": duration_settings[team.key][
                 "base_minutes"
             ],
@@ -574,6 +580,7 @@ def show_duration_page() -> None:
         width="stretch",
         disabled=["Mannschaft", "Quelle"],
         column_config={
+            "TeamKey": None,
             "Regeldauer inkl. Halbzeit (Min.)": st.column_config.NumberColumn(
                 min_value=10, max_value=180, step=1, required=True
             ),
@@ -585,7 +592,7 @@ def show_duration_page() -> None:
     )
 
     for _, row in duration_frame.iterrows():
-        team = team_by_label[str(row["Mannschaft"])]
+        team = team_by_key[str(row["TeamKey"])]
         duration_settings[team.key] = {
             "base_minutes": int(row["Regeldauer inkl. Halbzeit (Min.)"]),
             "extra_minutes": int(row["Unterbrechungspuffer (Min.)"]),
@@ -809,6 +816,7 @@ except Exception as exc:
 
 teams = available_teams(schedule)
 team_by_label = {team.label: team for team in teams}
+team_by_key = {team.key: team for team in teams}
 labels = list(team_by_label)
 oidc_configured = oidc_auth_is_configured()
 access, using_oidc = current_user_access()
