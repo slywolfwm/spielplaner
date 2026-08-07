@@ -9,8 +9,8 @@ from analysis import available_teams, find_overlaps, load_schedule
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CSV = APP_DIR / "Regionsspielplan_Bayern_2026-27.csv"
 
-st.set_page_config(page_title="Spielplan-Überschneidungen", page_icon="🤾", layout="wide")
-st.title("Spielplan-Überschneidungen")
+st.set_page_config(page_title="Spielplaner", page_icon="🤾", layout="wide")
+st.title("Spielplaner")
 st.caption("TSV Weilheim und weibliche A-Jugend des BSC Oberhausen · Saison 2026/27")
 
 uploaded = st.file_uploader("Optional: aktualisierten nuLiga-Gesamtspielplan laden", type="csv")

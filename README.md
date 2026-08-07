@@ -1,4 +1,4 @@
-# Spielplan-Überschneidungen
+# Spielplaner
 
 Lokale Streamlit-App für den Gesamtspielplan Bayern 2026/27. Enthalten sind alle
 Mannschaften des TSV Weilheim sowie die weibliche A-Jugend des BSC Oberhausen.
