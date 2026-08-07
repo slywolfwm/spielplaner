@@ -18,6 +18,21 @@ REQUIRED_COLUMNS = {
     "Gastmannschaft",
 }
 
+ISSUE_COLUMNS = [
+    "Priorität",
+    "Regel",
+    "Datum",
+    "Spiele",
+    "Halle",
+    "Kommentar",
+]
+RULE_TEAM_OVERLAP = "Überschneidung Mannschaftspaar"
+RULE_HOME_BUFFER = "Puffer zwischen Heimspielen"
+RULE_PRIORITIES = {
+    RULE_TEAM_OVERLAP: "Hoch",
+    RULE_HOME_BUFFER: "Mittel",
+}
+
 
 @dataclass(frozen=True)
 class Team:
@@ -112,6 +127,8 @@ def find_overlaps(
 ) -> pd.DataFrame:
     a = games_for_team(frame, team_a).copy()
     b = games_for_team(frame, team_b).copy()
+    a["HalleAnzeige"] = _display_halls(a)
+    b["HalleAnzeige"] = _display_halls(b)
     duration_a = pd.Timedelta(minutes=game_minutes_a)
     duration_b = pd.Timedelta(minutes=game_minutes_b)
     pre_buffer = pd.Timedelta(minutes=pre_buffer_minutes)
@@ -124,6 +141,10 @@ def find_overlaps(
             b_start = game_b.Anwurf - pre_buffer
             b_end = game_b.Anwurf + duration_b
             if a_start < b_end and b_start < a_end:
+                overlap_minutes = int(
+                    (min(a_end, b_end) - max(a_start, b_start)).total_seconds()
+                    // 60
+                )
                 results.append(
                     {
                         "Datum": game_a.Anwurf.date(),
@@ -136,6 +157,13 @@ def find_overlaps(
                         "Abstand (Min.)": int(
                             abs((game_b.Anwurf - game_a.Anwurf).total_seconds()) // 60
                         ),
+                        "Überschneidung (Min.)": overlap_minutes,
+                        "Halle A": _hall(game_a),
+                        "Halle B": _hall(game_b),
+                        "Gegner A": _opponent(game_a, team_a),
+                        "Gegner B": _opponent(game_b, team_b),
+                        "Spielort A": _home_or_away(game_a, team_a),
+                        "Spielort B": _home_or_away(game_b, team_b),
                     }
                 )
 
@@ -148,6 +176,13 @@ def find_overlaps(
         "Spiel B",
         "Anwurf B",
         "Abstand (Min.)",
+        "Überschneidung (Min.)",
+        "Halle A",
+        "Halle B",
+        "Gegner A",
+        "Gegner B",
+        "Spielort A",
+        "Spielort B",
     ]
     return pd.DataFrame(results, columns=columns).sort_values(
         ["Anwurf A", "Anwurf B"], ignore_index=True
@@ -201,6 +236,7 @@ def home_game_blocks(
                     "Hallennummer": hall_number,
                     "Halle": hall_name,
                     "Mannschaft": team.label,
+                    "Gegner": game["Gastmannschaft"],
                     "Spiel": f"{game['Heimmannschaft']} – {game['Gastmannschaft']}",
                     "Anwurf": kickoff,
                     "Vorbereitung ab": kickoff - pre_buffer,
@@ -215,6 +251,7 @@ def home_game_blocks(
         "Hallennummer",
         "Halle",
         "Mannschaft",
+        "Gegner",
         "Spiel",
         "Anwurf",
         "Vorbereitung ab",
@@ -248,9 +285,12 @@ def find_home_game_buffer_conflicts(
                         "Datum": following["Datum"],
                         "Halle": following["Halle"] or following["Hallennummer"],
                         "Vorherige Mannschaft": previous["Mannschaft"],
+                        "Vorheriger Gegner": previous["Gegner"],
                         "Vorheriges Spiel": previous["Spiel"],
+                        "Anwurf vorheriges Spiel": previous["Anwurf"],
                         "Spielende": previous["Spielende"],
                         "Nächste Mannschaft": following["Mannschaft"],
+                        "Nächster Gegner": following["Gegner"],
                         "Nächstes Spiel": following["Spiel"],
                         "Anwurf nächstes Spiel": following["Anwurf"],
                         "Vorbereitung ab": following["Vorbereitung ab"],
@@ -263,9 +303,12 @@ def find_home_game_buffer_conflicts(
         "Datum",
         "Halle",
         "Vorherige Mannschaft",
+        "Vorheriger Gegner",
         "Vorheriges Spiel",
+        "Anwurf vorheriges Spiel",
         "Spielende",
         "Nächste Mannschaft",
+        "Nächster Gegner",
         "Nächstes Spiel",
         "Anwurf nächstes Spiel",
         "Vorbereitung ab",
@@ -275,5 +318,150 @@ def find_home_game_buffer_conflicts(
     return pd.DataFrame(conflicts, columns=columns)
 
 
+def analyze_schedule(
+    frame: pd.DataFrame,
+    teams: list[Team],
+    duration_by_team_key: dict[str, int],
+    team_pairs: list[tuple[Team, Team]],
+    pre_buffer_minutes: int = 30,
+) -> pd.DataFrame:
+    """Run all active rules and return one concise row per finding."""
+    findings: list[dict[str, object]] = []
+
+    blocks = home_game_blocks(
+        frame, teams, duration_by_team_key, pre_buffer_minutes
+    )
+    for _, conflict in find_home_game_buffer_conflicts(
+        blocks, pre_buffer_minutes
+    ).iterrows():
+        findings.append(
+            {
+                "Priorität": RULE_PRIORITIES[RULE_HOME_BUFFER],
+                "Regel": RULE_HOME_BUFFER,
+                "Datum": conflict["Datum"],
+                "Spiele": " | ".join(
+                    (
+                        _game_summary(
+                            conflict["Anwurf vorheriges Spiel"],
+                            conflict["Vorherige Mannschaft"],
+                            conflict["Vorheriger Gegner"],
+                            "gegen",
+                        ),
+                        _game_summary(
+                            conflict["Anwurf nächstes Spiel"],
+                            conflict["Nächste Mannschaft"],
+                            conflict["Nächster Gegner"],
+                            "gegen",
+                        ),
+                    )
+                ),
+                "Halle": conflict["Halle"],
+                "Kommentar": (
+                    f"Verfügbar: {conflict['Verfügbarer Puffer (Min.)']} "
+                    f"Min.; erforderlich: {pre_buffer_minutes} Min.; es fehlen "
+                    f"{conflict['Fehlender Puffer (Min.)']} Min."
+                ),
+            }
+        )
+
+    seen_pairs: set[tuple[str, str]] = set()
+    for team_a, team_b in team_pairs:
+        pair_key = tuple(sorted((team_a.key, team_b.key)))
+        if team_a.key == team_b.key or pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        overlaps = find_overlaps(
+            frame,
+            team_a,
+            team_b,
+            duration_by_team_key[team_a.key],
+            duration_by_team_key[team_b.key],
+            pre_buffer_minutes,
+        )
+        for _, overlap in overlaps.iterrows():
+            findings.append(
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_TEAM_OVERLAP],
+                    "Regel": RULE_TEAM_OVERLAP,
+                    "Datum": min(overlap["Anwurf A"], overlap["Anwurf B"]).date(),
+                    "Spiele": " | ".join(
+                        (
+                            _game_summary(
+                                overlap["Anwurf A"],
+                                team_a.label,
+                                overlap["Gegner A"],
+                                overlap["Spielort A"],
+                            ),
+                            _game_summary(
+                                overlap["Anwurf B"],
+                                team_b.label,
+                                overlap["Gegner B"],
+                                overlap["Spielort B"],
+                            ),
+                        )
+                    ),
+                    "Halle": _join_unique(overlap["Halle A"], overlap["Halle B"]),
+                    "Kommentar": (
+                        "Die eingeplanten Zeitfenster überschneiden sich um "
+                        f"{overlap['Überschneidung (Min.)']} Min."
+                    ),
+                }
+            )
+
+    if not findings:
+        return pd.DataFrame(columns=ISSUE_COLUMNS)
+
+    priority_order = {"Hoch": 0, "Mittel": 1, "Niedrig": 2}
+    result = pd.DataFrame(findings, columns=ISSUE_COLUMNS).drop_duplicates()
+    result["_Priorität"] = result["Priorität"].map(priority_order)
+    return result.sort_values(
+        ["_Priorität", "Datum", "Regel", "Spiele"],
+        ignore_index=True,
+    ).drop(columns="_Priorität")
+
+
 def _meeting(row: object) -> str:
     return f"{row.Heimmannschaft} – {row.Gastmannschaft}"
+
+
+def _hall(row: object) -> str:
+    values = row._asdict() if hasattr(row, "_asdict") else {}
+    return str(
+        values.get("HalleAnzeige") or values.get("Hallennummer") or ""
+    ).strip()
+
+
+def _display_halls(frame: pd.DataFrame) -> pd.Series:
+    hall_names = (
+        frame["Inhalt Tooltip Halle"]
+        if "Inhalt Tooltip Halle" in frame
+        else pd.Series("", index=frame.index)
+    )
+    hall_numbers = (
+        frame["Hallennummer"]
+        if "Hallennummer" in frame
+        else pd.Series("", index=frame.index)
+    )
+    return hall_names.where(hall_names.astype(str).str.strip().ne(""), hall_numbers)
+
+
+def _opponent(row: object, team: Team) -> str:
+    if row.Heimmannschaft == team.club_name:
+        return str(row.Gastmannschaft)
+    return str(row.Heimmannschaft)
+
+
+def _home_or_away(row: object, team: Team) -> str:
+    return "gegen" if row.Heimmannschaft == team.club_name else "bei"
+
+
+def _game_summary(
+    kickoff: pd.Timestamp, team_label: str, opponent: str, location: str
+) -> str:
+    compact_label = re.sub(r"\s+\([^()]+\)$", "", team_label)
+    return f"{kickoff:%H:%M} · {compact_label} {location} {opponent}"
+
+
+def _join_unique(*values: object) -> str:
+    unique = list(dict.fromkeys(str(value).strip() for value in values if value))
+    return " / ".join(unique)

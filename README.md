@@ -13,10 +13,17 @@ Unter Windows `start_app.bat` doppelt anklicken. Alternativ in PowerShell:
 
 Die Navigation teilt die App in drei Seiten auf:
 
-- **Heimspiel-Puffer** prüft die Abstände aller Heimspiele der Saison.
+- **Spielplanprüfung** wendet alle aktiven Regeln auf die vollständige Saison an
+  und gibt eine priorisierte, kommentierte Ergebnistabelle aus.
 - **Spieldauern** verwaltet Regeldauer und Unterbrechungspuffer je Mannschaft.
-- **Mannschaftspaare** legt die zu vergleichenden Teams fest und prüft ihre
-  Überschneidungen.
+- **Mannschaftspaare** legt die Teams fest, die sich nicht überschneiden dürfen.
+
+Aktuell sind zwei Regeln aktiv: Überschneidungen definierter Mannschaftspaare
+haben die Priorität **hoch**, ein fehlender Puffer zwischen Heimspielen die
+Priorität **mittel**. Die spätere Kontrolle der Hallenbuchungen ist noch nicht
+aktiv. Pro Auffälligkeit wird genau eine Zeile mit Datum, betroffenen Spielen,
+Halle und einer konkreten Erläuterung ausgegeben. Doppelte und umgekehrt
+eingetragene Mannschaftspaare erzeugen keine redundanten Ergebnisse.
 
 Ein Zeitraumsfilter ist nicht erforderlich; die Prüfungen beziehen sich immer
 auf den vollständigen geladenen Saisonspielplan.
@@ -82,11 +89,11 @@ für den geschützten Bereich.
 
 ## Streamlit Community Cloud und eigene Domain
 
-Für die geplante Bereitstellung wird die App aus dem Branch `development` auf
+Für die geplante Bereitstellung wird die App aus dem Branch `main` auf
 Streamlit Community Cloud veröffentlicht. Repository und Einstiegspunkt sind:
 
 - Repository: `slywolfwm/spielplaner`
-- Branch: `development`
+- Branch: `main`
 - App-Datei: `app.py`
 - gewünschte Streamlit-URL: `spielplaner-handamball.streamlit.app`
 

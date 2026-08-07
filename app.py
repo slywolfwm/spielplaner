@@ -6,18 +6,19 @@ import streamlit as st
 
 from access_control import UserAccess, parse_client_principal, parse_oidc_user
 from analysis import (
+    RULE_HOME_BUFFER,
+    RULE_PRIORITIES,
+    RULE_TEAM_OVERLAP,
     Team,
+    analyze_schedule,
     available_teams,
     default_game_duration,
     default_stoppage_buffer,
-    find_home_game_buffer_conflicts,
-    find_overlaps,
     games_for_team,
-    home_game_blocks,
     load_schedule,
 )
 from duration_store import DurationStore
-from pair_store import PairStore
+from pair_store import PairStore, StoredPair
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -84,72 +85,6 @@ def create_duration_store(connection_string: str, table_name: str) -> DurationSt
     return DurationStore.from_connection_string(connection_string, table_name)
 
 
-def show_overlap_results(
-    pairs_to_check: list[tuple[str, str]],
-    schedule: pd.DataFrame,
-    team_by_label: dict[str, Team],
-    duration_by_team_key: dict[str, int],
-) -> None:
-    all_results = []
-    duplicate_pairs = set()
-    seen_pairs = set()
-
-    for label_a, label_b in pairs_to_check:
-        pair_key = tuple(sorted((label_a, label_b)))
-        if label_a == label_b:
-            st.warning(f"Übersprungen: {label_a} wurde mit sich selbst kombiniert.")
-            continue
-        if label_a not in team_by_label or label_b not in team_by_label:
-            st.warning(
-                f"Übersprungen: {label_a} ↔ {label_b} ist im aktuellen "
-                "Spielplan nicht vollständig enthalten."
-            )
-            continue
-        if pair_key in seen_pairs:
-            duplicate_pairs.add(pair_key)
-            continue
-        seen_pairs.add(pair_key)
-        team_a = team_by_label[label_a]
-        team_b = team_by_label[label_b]
-        result = find_overlaps(
-            schedule,
-            team_a,
-            team_b,
-            duration_by_team_key[team_a.key],
-            duration_by_team_key[team_b.key],
-            PRE_GAME_BUFFER_MINUTES,
-        )
-        if not result.empty:
-            result.insert(0, "Paar", f"{label_a} ↔ {label_b}")
-            all_results.append(result)
-
-    if duplicate_pairs:
-        st.info("Doppelt angelegte Mannschaftspaare wurden nur einmal geprüft.")
-
-    if not all_results:
-        st.success("Für die ausgewählten Paare wurden keine Überschneidungen gefunden.")
-        return
-
-    result = pd.concat(all_results, ignore_index=True)
-    st.error(f"{len(result)} Überschneidung(en) gefunden.")
-    st.dataframe(
-        result,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Anwurf A": st.column_config.DatetimeColumn(format="DD.MM.YYYY HH:mm"),
-            "Anwurf B": st.column_config.DatetimeColumn(format="DD.MM.YYYY HH:mm"),
-            "Datum": st.column_config.DateColumn(format="DD.MM.YYYY"),
-        },
-    )
-    st.download_button(
-        "Ergebnis als CSV herunterladen",
-        result.to_csv(index=False, sep=";").encode("utf-8-sig"),
-        "spielplan_ueberschneidungen.csv",
-        "text/csv",
-    )
-
-
 def initialize_duration_settings() -> dict[str, dict[str, int]]:
     settings = st.session_state.setdefault("duration_settings", {})
     for team in teams:
@@ -197,62 +132,122 @@ def duration_source(team: Team) -> str:
     return "Sitzung"
 
 
-def show_hall_page() -> None:
-    st.header("Heimspiel-Puffer")
+def load_saved_pairs() -> tuple[PairStore | None, list[StoredPair], str]:
+    if not access.can_view_pairings or not connection_string:
+        return None, [], ""
+
+    try:
+        pair_store = create_pair_store(
+            connection_string,
+            configured_value("AZURE_TABLE_NAME", "teampairs"),
+        )
+        return pair_store, pair_store.list_pairs(SEASON), ""
+    except Exception as exc:
+        return None, [], str(exc)
+
+
+def pairs_for_analysis(
+    saved_pairs: list[StoredPair],
+) -> tuple[list[tuple[Team, Team]], int]:
+    raw_pairs = list(st.session_state.get("manual_pairs", []))
+    raw_pairs.extend((pair.team_a, pair.team_b) for pair in saved_pairs)
+    result: list[tuple[Team, Team]] = []
+    seen: set[tuple[str, str]] = set()
+    skipped = 0
+
+    for label_a, label_b in raw_pairs:
+        if (
+            label_a == label_b
+            or label_a not in team_by_label
+            or label_b not in team_by_label
+        ):
+            skipped += 1
+            continue
+        key = tuple(sorted((label_a, label_b), key=str.casefold))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((team_by_label[label_a], team_by_label[label_b]))
+    return result, skipped
+
+
+def show_analysis_page() -> None:
+    st.header("Spielplanprüfung")
     st.caption(
-        "Geprüft werden alle Heimspiele der enthaltenen Mannschaften in derselben "
-        f"Halle. Die Vorbereitung beginnt {PRE_GAME_BUFFER_MINUTES} Minuten vor Anwurf."
+        "Alle aktiven Regeln werden auf den vollständigen Spielplan der enthaltenen "
+        "Mannschaften angewendet. Jeder gefundene Sachverhalt erscheint genau einmal."
     )
 
-    if st.button("Heimspiel-Puffer prüfen", type="primary", width="stretch"):
-        occupancy = home_game_blocks(
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_TEAM_OVERLAP],
+                    "Regel": RULE_TEAM_OVERLAP,
+                    "Prüfumfang": "Alle definierten Mannschaftspaare",
+                },
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HOME_BUFFER],
+                    "Regel": RULE_HOME_BUFFER,
+                    "Prüfumfang": (
+                        f"Alle Heimspiele; {PRE_GAME_BUFFER_MINUTES} Min. Vorlauf"
+                    ),
+                },
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("Hallenbuchungen werden in einer späteren Ausbaustufe geprüft.")
+
+    _, saved_pairs, pair_error = load_saved_pairs()
+    if pair_error:
+        st.warning(
+            "Gespeicherte Mannschaftspaare konnten nicht geladen werden. "
+            "Manuell festgelegte Paare werden weiterhin geprüft."
+        )
+    analysis_pairs, skipped_pairs = pairs_for_analysis(saved_pairs)
+    if not analysis_pairs:
+        st.info(
+            "Es ist noch kein gültiges Mannschaftspaar definiert. Die Pufferregel "
+            "wird trotzdem vollständig geprüft."
+        )
+    elif skipped_pairs:
+        st.caption(
+            f"{skipped_pairs} ungültige Paarung(en) werden bei der Prüfung übersprungen."
+        )
+
+    if st.button("Gesamten Spielplan prüfen", type="primary", width="stretch"):
+        findings = analyze_schedule(
             schedule,
             teams,
             current_duration_map(),
+            analysis_pairs,
             PRE_GAME_BUFFER_MINUTES,
         )
-        conflicts = find_home_game_buffer_conflicts(
-            occupancy, PRE_GAME_BUFFER_MINUTES
-        )
-        if conflicts.empty:
-            st.success("Zwischen den Heimspielen ist der benötigte Puffer eingeplant.")
+        if findings.empty:
+            st.success("Die aktiven Regeln haben keine Auffälligkeiten gefunden.")
         else:
-            st.error(f"{len(conflicts)} zu knappe Hallenabfolge(n) gefunden.")
+            st.error(f"{len(findings)} Auffälligkeit(en) gefunden.")
             st.dataframe(
-                conflicts,
+                findings,
                 hide_index=True,
                 width="stretch",
                 column_config={
-                    "Datum": st.column_config.DateColumn(format="DD.MM.YYYY"),
-                    "Spielende": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
+                    "Priorität": st.column_config.TextColumn(width="small"),
+                    "Regel": st.column_config.TextColumn(width="medium"),
+                    "Datum": st.column_config.DateColumn(
+                        format="DD.MM.YYYY", width="small"
                     ),
-                    "Anwurf nächstes Spiel": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
-                    ),
-                    "Vorbereitung ab": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
-                    ),
+                    "Spiele": st.column_config.TextColumn(width="large"),
+                    "Kommentar": st.column_config.TextColumn(width="large"),
                 },
             )
-
-        with st.expander("Berechnete Hallenbelegung"):
-            st.dataframe(
-                occupancy.drop(columns=["Hallenschlüssel"]),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Datum": st.column_config.DateColumn(format="DD.MM.YYYY"),
-                    "Anwurf": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
-                    ),
-                    "Vorbereitung ab": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
-                    ),
-                    "Spielende": st.column_config.DatetimeColumn(
-                        format="DD.MM.YYYY HH:mm"
-                    ),
-                },
+            st.download_button(
+                "Kommentierte Prüfung als CSV herunterladen",
+                findings.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                "spielplan_pruefung.csv",
+                "text/csv",
             )
 
     with st.expander("Enthaltene Mannschaften"):
@@ -371,7 +366,8 @@ def show_pair_page() -> None:
     st.header("Mannschaftspaare")
     st.caption(
         "Lege Mannschaftspaare fest, deren Belegungszeiten sich nicht "
-        "überschneiden dürfen."
+        "überschneiden dürfen. Die Spielplanprüfung berücksichtigt automatisch "
+        "alle gültigen manuellen und für dich sichtbaren gespeicherten Paarungen."
     )
 
     pair_count = st.number_input(
@@ -396,8 +392,14 @@ def show_pair_page() -> None:
             )
         pairs.append((label_a, label_b))
 
-    saved_check_requested = False
-    saved_pairs_to_check: list[tuple[str, str]] = []
+    st.session_state["manual_pairs"] = pairs
+    valid_manual_pairs = [pair for pair in pairs if pair[0] != pair[1]]
+    if len(valid_manual_pairs) != len(pairs):
+        st.warning("Paarungen einer Mannschaft mit sich selbst werden nicht geprüft.")
+    else:
+        st.success(
+            "Die aktuelle Auswahl wird bei der nächsten Spielplanprüfung verwendet."
+        )
 
     with st.expander("Gespeicherte Paarungen", expanded=access.can_view_pairings):
         if not access.authenticated:
@@ -411,15 +413,11 @@ def show_pair_page() -> None:
         elif not connection_string:
             st.warning("Azure Table Storage ist noch nicht für die App konfiguriert.")
         else:
-            try:
-                pair_store = create_pair_store(
-                    connection_string,
-                    configured_value("AZURE_TABLE_NAME", "teampairs"),
-                )
-                stored_pairs = pair_store.list_pairs(SEASON)
-            except Exception as exc:
+            pair_store, stored_pairs, pair_error = load_saved_pairs()
+            if pair_error:
                 st.error(
-                    f"Gespeicherte Paarungen konnten nicht geladen werden: {exc}"
+                    "Gespeicherte Paarungen konnten nicht geladen werden: "
+                    f"{pair_error}"
                 )
             else:
                 notice = st.session_state.pop("pairing_notice", "")
@@ -446,29 +444,13 @@ def show_pair_page() -> None:
                         width="stretch",
                     )
                     stored_by_key = {pair.row_key: pair for pair in stored_pairs}
-                    selected_keys = st.multiselect(
-                        "Für die Prüfung auswählen",
-                        options=list(stored_by_key),
-                        default=list(stored_by_key),
-                        format_func=lambda key: stored_by_key[key].label,
-                    )
-                    saved_pairs_to_check = [
-                        (stored_by_key[key].team_a, stored_by_key[key].team_b)
-                        for key in selected_keys
-                    ]
-                    saved_check_requested = st.button(
-                        "Gespeicherte Paarungen prüfen",
-                        disabled=not saved_pairs_to_check,
-                        width="stretch",
-                    )
                 else:
                     st.info("Es wurden noch keine Paarungen gespeichert.")
 
                 if access.can_edit_pairings:
                     st.divider()
                     if st.button("Aktuelle Auswahl speichern", width="stretch"):
-                        valid_pairs = [pair for pair in pairs if pair[0] != pair[1]]
-                        if not valid_pairs:
+                        if not valid_manual_pairs:
                             st.warning(
                                 "Wähle mindestens zwei unterschiedliche "
                                 "Mannschaften aus."
@@ -476,7 +458,7 @@ def show_pair_page() -> None:
                         else:
                             saved = pair_store.save_pairs(
                                 SEASON,
-                                valid_pairs,
+                                valid_manual_pairs,
                                 access.object_id or access.display_name,
                             )
                             st.session_state["pairing_notice"] = (
@@ -502,33 +484,15 @@ def show_pair_page() -> None:
                             )
                             st.rerun()
 
-    manual_check_requested = st.button(
-        "Überschneidungen prüfen", type="primary", width="stretch"
-    )
-    if saved_check_requested:
-        show_overlap_results(
-            saved_pairs_to_check,
-            schedule,
-            team_by_label,
-            current_duration_map(),
-        )
-    elif manual_check_requested:
-        show_overlap_results(
-            pairs,
-            schedule,
-            team_by_label,
-            current_duration_map(),
-        )
-
 
 st.set_page_config(page_title="Spielplaner", page_icon="🤾", layout="wide")
 page = st.navigation(
     [
         st.Page(
-            show_hall_page,
-            title="Heimspiel-Puffer",
-            icon="🏟️",
-            url_path="heimspiel-puffer",
+            show_analysis_page,
+            title="Spielplanprüfung",
+            icon="✅",
+            url_path="spielplanpruefung",
             default=True,
         ),
         st.Page(

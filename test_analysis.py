@@ -1,7 +1,11 @@
 import pandas as pd
 
 from analysis import (
+    ISSUE_COLUMNS,
+    RULE_HOME_BUFFER,
+    RULE_TEAM_OVERLAP,
     Team,
+    analyze_schedule,
     available_teams,
     default_game_duration,
     default_stoppage_buffer,
@@ -148,3 +152,66 @@ def test_home_game_check_detects_missing_pre_game_buffer():
     assert len(conflicts) == 1
     assert conflicts.iloc[0]["Verfügbarer Puffer (Min.)"] == 20
     assert conflicts.iloc[0]["Fehlender Puffer (Min.)"] == 10
+
+
+def test_schedule_analysis_combines_rules_without_duplicate_pair_findings():
+    frame = pd.DataFrame(
+        [
+            {
+                "Anwurf": pd.Timestamp("2026-10-11 14:00"),
+                "Hallennummer": "270462",
+                "Inhalt Tooltip Halle": "Weilheim, Am Hardt",
+                "Spielnummer": "1",
+                "Liga": "BOL MA",
+                "Staffelkurzbezeichnung": "A1",
+                "Heimmannschaft": "TSV Weilheim",
+                "Gastmannschaft": "Gegner 1",
+            },
+            {
+                "Anwurf": pd.Timestamp("2026-10-11 15:30"),
+                "Hallennummer": "270462",
+                "Inhalt Tooltip Halle": "Weilheim, Am Hardt",
+                "Spielnummer": "2",
+                "Liga": "OL MB",
+                "Staffelkurzbezeichnung": "B1",
+                "Heimmannschaft": "TSV Weilheim",
+                "Gastmannschaft": "Gegner 2",
+            },
+        ]
+    )
+    team_a = Team("a", "A-Jugend", "TSV Weilheim", "BOL MA", "A1")
+    team_b = Team("b", "B-Jugend", "TSV Weilheim", "OL MB", "B1")
+
+    result = analyze_schedule(
+        frame,
+        [team_a, team_b],
+        {"a": 70, "b": 60},
+        [(team_a, team_b), (team_b, team_a)],
+    )
+
+    assert list(result.columns) == ISSUE_COLUMNS
+    assert len(result) == 2
+    assert result["Regel"].tolist() == [RULE_TEAM_OVERLAP, RULE_HOME_BUFFER]
+    assert result["Priorität"].tolist() == ["Hoch", "Mittel"]
+    assert "10 Min." in result.iloc[0]["Kommentar"]
+    assert "es fehlen 10 Min." in result.iloc[1]["Kommentar"]
+
+
+def test_schedule_analysis_returns_stable_empty_table():
+    frame = pd.DataFrame(
+        columns=[
+            "Anwurf",
+            "Hallennummer",
+            "Inhalt Tooltip Halle",
+            "Spielnummer",
+            "Liga",
+            "Staffelkurzbezeichnung",
+            "Heimmannschaft",
+            "Gastmannschaft",
+        ]
+    )
+
+    result = analyze_schedule(frame, [], {}, [])
+
+    assert result.empty
+    assert list(result.columns) == ISSUE_COLUMNS
