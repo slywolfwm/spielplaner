@@ -1,4 +1,5 @@
 import os
+from base64 import b64encode
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +27,10 @@ DEFAULT_CSV = APP_DIR / "Regionsspielplan_Bayern_2026-27.csv"
 DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
 SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
+BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
+BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
+BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
+BRAND_FONT_BOLD = APP_DIR / "static" / "eras-bold.ttf"
 
 
 def configured_value(name: str, default: str = "") -> str:
@@ -73,6 +78,272 @@ def show_login_action(key: str) -> None:
         )
     else:
         st.caption("Die Microsoft-Anmeldung ist lokal nicht konfiguriert.")
+
+
+def asset_data_uri(path: Path, media_type: str) -> str:
+    encoded = b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
+
+
+def apply_brand_theme() -> None:
+    medium_font = asset_data_uri(BRAND_FONT_MEDIUM, "font/ttf")
+    demi_font = asset_data_uri(BRAND_FONT_DEMI, "font/ttf")
+    bold_font = asset_data_uri(BRAND_FONT_BOLD, "font/ttf")
+    theme = (
+        """
+        <style>
+        @font-face {
+            font-family: "Eras Web";
+            src: url("__MEDIUM_FONT__") format("truetype");
+            font-display: swap;
+            font-style: normal;
+            font-weight: 500;
+        }
+
+        @font-face {
+            font-family: "Eras Web";
+            src: url("__DEMI_FONT__") format("truetype");
+            font-display: swap;
+            font-style: normal;
+            font-weight: 700 800;
+        }
+
+        @font-face {
+            font-family: "Eras Web";
+            src: url("__BOLD_FONT__") format("truetype");
+            font-display: swap;
+            font-style: normal;
+            font-weight: 900;
+        }
+        """
+        .replace("__MEDIUM_FONT__", medium_font)
+        .replace("__DEMI_FONT__", demi_font)
+        .replace("__BOLD_FONT__", bold_font)
+    )
+    st.markdown(
+        theme
+        + """
+        :root {
+            --brand-blue: #053782;
+            --brand-red: #e00a1d;
+            --brand-red-hover: #bf0b1d;
+            --brand-background: #f4f6fb;
+            --brand-surface: #ffffff;
+            --brand-line: #e5e7eb;
+            --brand-text: #1f2937;
+            --brand-heading: #111827;
+            --brand-muted: #667085;
+            --brand-card-radius: 0.85rem;
+            --brand-button-radius: 999px;
+            --brand-shadow: 0 8px 22px rgba(5, 55, 130, 0.07);
+            --brand-font: "Eras Web", "Trebuchet MS", system-ui, sans-serif;
+        }
+
+        html, body, [data-testid="stAppViewContainer"] {
+            font-family: var(--brand-font);
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: var(--brand-background);
+            color: var(--brand-text);
+        }
+
+        [data-testid="stHeader"] {
+            background: rgba(255, 255, 255, 0.98);
+            border-bottom: 1px solid var(--brand-line);
+        }
+
+        [data-testid="stSidebar"] {
+            background: var(--brand-surface);
+            border-right: 1px solid var(--brand-line);
+        }
+
+        [data-testid="stSidebarNav"] a {
+            border-radius: var(--brand-button-radius);
+            color: var(--brand-heading);
+            font-weight: 700;
+            padding: 0.55rem 0.8rem;
+        }
+
+        [data-testid="stSidebarNav"] a[aria-current="page"] {
+            background: rgba(5, 55, 130, 0.1);
+            color: var(--brand-blue);
+        }
+
+        [data-testid="stMainBlockContainer"] {
+            max-width: 1200px;
+            padding-top: 1.5rem;
+            padding-bottom: 4rem;
+        }
+
+        h1, h2, h3 {
+            color: var(--brand-heading) !important;
+            font-family: var(--brand-font) !important;
+            font-weight: 900 !important;
+            letter-spacing: 0 !important;
+        }
+
+        h2 {
+            color: var(--brand-blue) !important;
+        }
+
+        p, label, [data-testid="stCaptionContainer"] {
+            color: var(--brand-text);
+        }
+
+        [data-testid="stCaptionContainer"] {
+            color: var(--brand-muted);
+        }
+
+        .spielplaner-masthead {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            align-items: center;
+            gap: 1rem;
+            margin: 0 0 2rem;
+            padding: 1rem 1.15rem;
+            background: var(--brand-surface);
+            border: 1px solid var(--brand-line);
+            border-left: 0.38rem solid var(--brand-red);
+            border-radius: var(--brand-card-radius);
+            box-shadow: var(--brand-shadow);
+        }
+
+        .spielplaner-masthead img {
+            display: block;
+            width: 4.25rem;
+            height: 4.25rem;
+            object-fit: contain;
+        }
+
+        .spielplaner-masthead__club {
+            margin: 0 0 0.1rem;
+            color: var(--brand-blue);
+            font-size: 0.82rem;
+            font-weight: 800;
+            letter-spacing: 0.045em;
+            text-transform: uppercase;
+        }
+
+        .spielplaner-masthead h1 {
+            margin: 0;
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            line-height: 1;
+        }
+
+        .spielplaner-masthead__meta {
+            margin: 0.35rem 0 0;
+            color: var(--brand-muted);
+            font-size: 0.95rem;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        [data-testid="stBaseButton-primary"],
+        [data-testid="stBaseButton-secondary"] {
+            min-height: 2.75rem;
+            border-radius: var(--brand-button-radius) !important;
+            font-family: var(--brand-font);
+            font-weight: 800;
+        }
+
+        [data-testid="stBaseButton-primary"] {
+            border-color: var(--brand-red) !important;
+            background: var(--brand-red) !important;
+            color: #ffffff !important;
+        }
+
+        [data-testid="stBaseButton-primary"]:hover {
+            border-color: var(--brand-red-hover) !important;
+            background: var(--brand-red-hover) !important;
+        }
+
+        [data-testid="stBaseButton-secondary"] {
+            border-color: var(--brand-blue) !important;
+            background: var(--brand-surface) !important;
+            color: var(--brand-blue) !important;
+        }
+
+        [data-testid="stBaseButton-secondary"]:hover {
+            background: rgba(5, 55, 130, 0.08) !important;
+        }
+
+        [data-testid="stDataFrame"],
+        [data-testid="stDataEditor"],
+        [data-testid="stFileUploader"],
+        [data-testid="stExpander"] {
+            overflow: hidden;
+            border: 1px solid var(--brand-line);
+            border-radius: var(--brand-card-radius);
+            background: var(--brand-surface);
+            box-shadow: var(--brand-shadow);
+        }
+
+        [data-testid="stAlert"] {
+            border-radius: var(--brand-card-radius);
+            box-shadow: none;
+        }
+
+        [data-testid="stFileUploader"] {
+            padding: 1rem;
+        }
+
+        [data-testid="stFileUploader"] label {
+            display: block;
+            margin-bottom: 0.45rem;
+        }
+
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        [data-testid="stNumberInput"] input {
+            border-radius: var(--brand-card-radius) !important;
+        }
+
+        a:focus-visible, button:focus-visible, input:focus-visible {
+            outline: 3px solid #ffb3bb !important;
+            outline-offset: 3px;
+        }
+
+        @media (max-width: 700px) {
+            [data-testid="stMainBlockContainer"] {
+                padding-top: 3rem;
+            }
+
+            .spielplaner-masthead {
+                grid-template-columns: auto minmax(0, 1fr);
+                gap: 0.75rem;
+                padding: 0.85rem;
+            }
+
+            .spielplaner-masthead img {
+                width: 3.5rem;
+                height: 3.5rem;
+            }
+
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def show_brand_header() -> None:
+    logo = asset_data_uri(BRAND_LOGO, "image/webp")
+    st.markdown(
+        f"""
+        <div class="spielplaner-masthead">
+            <img src="{logo}" alt="TSV Weilheim Handball">
+            <div>
+                <p class="spielplaner-masthead__club">TSV Weilheim Handball</p>
+                <h1>Spielplaner</h1>
+                <p class="spielplaner-masthead__meta">
+                    TSV Weilheim und weibliche A-Jugend des BSC Oberhausen, Saison 2026/27
+                </p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -485,33 +756,34 @@ def show_pair_page() -> None:
                             st.rerun()
 
 
-st.set_page_config(page_title="Spielplaner", page_icon="🤾", layout="wide")
+st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="wide")
+apply_brand_theme()
+st.logo(str(BRAND_LOGO))
 page = st.navigation(
     [
         st.Page(
             show_analysis_page,
             title="Spielplanprüfung",
-            icon="✅",
+            icon=":material/fact_check:",
             url_path="spielplanpruefung",
             default=True,
         ),
         st.Page(
             show_duration_page,
             title="Spieldauern",
-            icon="⏱️",
+            icon=":material/schedule:",
             url_path="spieldauern",
         ),
         st.Page(
             show_pair_page,
             title="Mannschaftspaare",
-            icon="🔗",
+            icon=":material/group_work:",
             url_path="mannschaftspaare",
         ),
     ]
 )
 
-st.title("Spielplaner")
-st.caption("TSV Weilheim und weibliche A-Jugend des BSC Oberhausen · Saison 2026/27")
+show_brand_header()
 uploaded = st.file_uploader(
     "Optional: aktualisierten nuLiga-Gesamtspielplan laden", type="csv"
 )

@@ -1,0 +1,11 @@
+[theme]
+primaryColor = "#e00a1d"
+backgroundColor = "#f4f6fb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1f2937"
+font = "sans serif"
+baseRadius = "0.85rem"
+buttonRadius = "full"
+
+[server]
+enableStaticServing = true
