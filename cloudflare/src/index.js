@@ -2,7 +2,8 @@ export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
     const upstreamOrigin = new URL(env.UPSTREAM_ORIGIN);
-    const upstreamUrl = new URL(publicUrl.pathname + publicUrl.search, upstreamOrigin);
+    const upstreamPath = `/~/+${publicUrl.pathname}`;
+    const upstreamUrl = new URL(upstreamPath + publicUrl.search, upstreamOrigin);
     const upstreamRequest = new Request(upstreamUrl, request);
 
     if (upstreamRequest.headers.get("Origin") === publicUrl.origin) {
@@ -24,6 +25,8 @@ export default {
     if (location) {
       const locationUrl = new URL(location, upstreamOrigin);
       if (locationUrl.origin === upstreamOrigin.origin) {
+        locationUrl.pathname =
+          locationUrl.pathname.replace(/^\/~\/\+/, "") || "/";
         locationUrl.protocol = publicUrl.protocol;
         locationUrl.host = publicUrl.host;
         response.headers.set("Location", locationUrl.toString());

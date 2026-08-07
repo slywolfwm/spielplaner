@@ -9,11 +9,11 @@ test("proxy forwards paths and rewrites the public origin", async () => {
   const forwardedRequests = [];
   globalThis.fetch = async (request) => {
     forwardedRequests.push(request);
-    if (new URL(request.url).pathname === "/redirect") {
+    if (new URL(request.url).pathname === "/~/+/redirect") {
       return new Response(null, {
         status: 302,
         headers: {
-          Location: "https://spielplaner-handamball.streamlit.app/spieldauern",
+          Location: "https://spielplaner-handamball.streamlit.app/~/+/spieldauern",
         },
       });
     }
@@ -34,7 +34,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     assert.equal(await response.text(), "ok");
     assert.equal(
       forwardedRequests[0].url,
-      "https://spielplaner-handamball.streamlit.app/mannschaftspaare?team=1",
+      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1",
     );
     assert.equal(
       forwardedRequests[0].headers.get("Origin"),
