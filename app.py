@@ -28,6 +28,7 @@ DEFAULT_CSV = APP_DIR / "Regionsspielplan_Bayern_2026-27.csv"
 DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
 SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
+DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
 BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
@@ -93,6 +94,25 @@ def show_login_action(key: str) -> None:
         )
     else:
         st.caption("Die Microsoft-Anmeldung ist lokal nicht konfiguriert.")
+
+
+def require_tenant_access(expected_tenant_id: str) -> None:
+    if access.belongs_to_tenant(expected_tenant_id):
+        return
+
+    show_brand_header()
+    if access.authenticated:
+        st.error("Dieses Microsoft-Konto gehört nicht zum freigegebenen Tenant.")
+        if using_oidc:
+            st.button("Abmelden", key="tenant_logout", on_click=st.logout)
+    else:
+        st.header("Anmeldung erforderlich")
+        st.write(
+            "Der Spielplaner ist ausschließlich für Personen im Microsoft-Tenant "
+            "von handamball.de zugänglich."
+        )
+        show_login_action("app_login")
+    st.stop()
 
 
 def asset_data_uri(path: Path, media_type: str) -> str:
@@ -667,11 +687,6 @@ def show_pair_page() -> None:
                 if notice:
                     st.success(notice)
 
-                st.caption(
-                    f"Angemeldet als {access.display_name or 'Microsoft-Benutzer'}"
-                )
-                if using_oidc:
-                    st.button("Abmelden", key="pairing_logout", on_click=st.logout)
                 if stored_pairs:
                     st.dataframe(
                         pd.DataFrame(
@@ -787,6 +802,12 @@ def show_guide_page() -> None:
 st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="wide")
 apply_brand_theme()
 st.logo(str(BRAND_LOGO), size="large")
+oidc_configured = oidc_auth_is_configured()
+access, using_oidc = current_user_access()
+tenant_id = configured_value(
+    "MICROSOFT_TENANT_ID", DEFAULT_MICROSOFT_TENANT_ID
+)
+require_tenant_access(tenant_id)
 page = st.navigation(
     [
         st.Page(
@@ -817,6 +838,11 @@ page = st.navigation(
     ]
 )
 
+with st.sidebar:
+    st.caption(f"Angemeldet als {access.display_name or 'Microsoft-Benutzer'}")
+    if using_oidc:
+        st.button("Abmelden", key="sidebar_logout", on_click=st.logout)
+
 show_brand_header()
 uploaded = st.file_uploader(
     "Optional: aktualisierten nuLiga-Gesamtspielplan laden", type="csv"
@@ -845,8 +871,6 @@ teams = available_teams(schedule)
 team_by_label = {team.label: team for team in teams}
 team_by_key = {team.key: team for team in teams}
 labels = list(team_by_label)
-oidc_configured = oidc_auth_is_configured()
-access, using_oidc = current_user_access()
 connection_string = configured_value("AZURE_STORAGE_CONNECTION_STRING")
 duration_store = None
 stored_durations = {}
