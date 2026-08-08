@@ -6,6 +6,9 @@ export default {
     const upstreamUrl = new URL(upstreamPath + publicUrl.search, upstreamOrigin);
     const upstreamRequest = new Request(upstreamUrl, request);
 
+    if (request.headers.get("Origin") === publicUrl.origin) {
+      upstreamRequest.headers.set("Origin", publicUrl.origin);
+    }
     upstreamRequest.headers.set("X-Forwarded-Host", publicUrl.host);
     upstreamRequest.headers.set(
       "X-Forwarded-Proto",
