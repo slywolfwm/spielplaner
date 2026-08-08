@@ -9,6 +9,7 @@ from dataclasses import dataclass
 VIEWER_ROLE = "Pairings.Viewer"
 EDITOR_ROLE = "Pairings.Editor"
 ROLE_CLAIM = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
+TENANT_CLAIM = "http://schemas.microsoft.com/identity/claims/tenantid"
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class UserAccess:
     display_name: str = ""
     object_id: str = ""
     roles: frozenset[str] = frozenset()
+    tenant_id: str = ""
 
     @property
     def can_view_pairings(self) -> bool:
@@ -25,6 +27,13 @@ class UserAccess:
     @property
     def can_edit_pairings(self) -> bool:
         return EDITOR_ROLE in self.roles
+
+    def belongs_to_tenant(self, expected_tenant_id: str) -> bool:
+        return (
+            self.authenticated
+            and bool(expected_tenant_id)
+            and self.tenant_id.casefold() == expected_tenant_id.casefold()
+        )
 
 
 def parse_client_principal(encoded_principal: str | None) -> UserAccess:
@@ -62,7 +71,14 @@ def parse_client_principal(encoded_principal: str | None) -> UserAccess:
         "http://schemas.microsoft.com/identity/claims/objectidentifier",
         "oid",
     )
-    return UserAccess(True, display_name, object_id, frozenset(roles))
+    tenant_id = _first_claim(values, TENANT_CLAIM, "tid")
+    return UserAccess(
+        authenticated=True,
+        display_name=display_name,
+        object_id=object_id,
+        roles=frozenset(roles),
+        tenant_id=tenant_id,
+    )
 
 
 def parse_oidc_user(user: Mapping[str, object] | None) -> UserAccess:
@@ -80,7 +96,14 @@ def parse_oidc_user(user: Mapping[str, object] | None) -> UserAccess:
         "name",
     )
     object_id = _first_mapping_value(user, "oid", "sub")
-    return UserAccess(True, display_name, object_id, frozenset(roles))
+    tenant_id = _first_mapping_value(user, "tid", TENANT_CLAIM)
+    return UserAccess(
+        authenticated=True,
+        display_name=display_name,
+        object_id=object_id,
+        roles=frozenset(roles),
+        tenant_id=tenant_id,
+    )
 
 
 def _first_claim(values: dict[str, list[str]], *claim_types: str) -> str:

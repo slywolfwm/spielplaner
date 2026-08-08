@@ -67,10 +67,11 @@ Regelgrundlagen für die Startwerte:
 - [Durchführungsbestimmungen E-Jugend Alpenvorland 2025/26](https://www.bhv-online.de/filemanager/Bezirke/Alpenvorland/Daten/Spielbetrieb/Saison%202025_26/dbst-25-26-ejugend.pdf)
 - [Durchführungsbestimmungen F-Jugend/Minis Alpenvorland 2025/26](https://www.bhv-online.de/filemanager/Bezirke/Alpenvorland/Daten/Spielbetrieb/Saison%202025_26/dbst-25-26-fjugend.pdf)
 
-## Geschützte gespeicherte Paarungen
+## Anmeldung und geschützte gespeicherte Paarungen
 
-Die normale Analyse bleibt öffentlich. Gespeicherte Paarungen werden nur für
-angemeldete Benutzer mit einer der Microsoft-Entra-App-Rollen angezeigt:
+Die gesamte App ist ausschließlich für angemeldete Benutzer aus dem
+konfigurierten Microsoft-Entra-Tenant zugänglich. Zusätzlich steuern die
+Microsoft-Entra-App-Rollen den Zugriff auf dauerhaft gespeicherte Einstellungen:
 
 - `Pairings.Viewer`: gespeicherte Paarungen sehen und prüfen
 - `Pairings.Editor`: zusätzlich Paarungen speichern und löschen sowie
@@ -84,11 +85,12 @@ Einträge in den Streamlit-Secrets:
 - `AZURE_TABLE_NAME`: optionaler Tabellenname, Standard ist `teampairs`
 - `AZURE_DURATION_TABLE_NAME`: optionaler Tabellenname für Spieldauern, Standard
   ist `teamdurations`
+- `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden
+  dürfen
 
 In Azure App Service muss Microsoft Entra als Identitätsanbieter eingerichtet
-sein. Nicht authentifizierte Anforderungen bleiben erlaubt, damit die allgemeine
-Analyse öffentlich erreichbar bleibt. Die App prüft die Rollen ausschließlich
-für den geschützten Bereich.
+sein. Die App kontrolliert Anmeldung und Tenant zusätzlich selbst, bevor sie
+Navigation, Upload oder Spielplandaten anzeigt.
 
 ## Streamlit Community Cloud und eigene Domain
 
