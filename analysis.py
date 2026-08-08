@@ -6,6 +6,8 @@ import re
 
 import pandas as pd
 
+from priorities import normalize_priority
+
 
 REQUIRED_COLUMNS = {
     "Datum",
@@ -322,7 +324,7 @@ def analyze_schedule(
     frame: pd.DataFrame,
     teams: list[Team],
     duration_by_team_key: dict[str, int],
-    team_pairs: list[tuple[Team, Team]],
+    team_pairs: list[tuple[Team, Team] | tuple[Team, Team, str]],
     pre_buffer_minutes: int = 30,
 ) -> pd.DataFrame:
     """Run all active rules and return one concise row per finding."""
@@ -365,7 +367,9 @@ def analyze_schedule(
         )
 
     seen_pairs: set[tuple[str, str]] = set()
-    for team_a, team_b in team_pairs:
+    for pair in team_pairs:
+        team_a, team_b = pair[:2]
+        priority = normalize_priority(pair[2] if len(pair) == 3 else None)
         pair_key = tuple(sorted((team_a.key, team_b.key)))
         if team_a.key == team_b.key or pair_key in seen_pairs:
             continue
@@ -381,7 +385,7 @@ def analyze_schedule(
         for _, overlap in overlaps.iterrows():
             findings.append(
                 {
-                    "Priorität": RULE_PRIORITIES[RULE_TEAM_OVERLAP],
+                    "Priorität": priority,
                     "Regel": RULE_TEAM_OVERLAP,
                     "Datum": min(overlap["Anwurf A"], overlap["Anwurf B"]).date(),
                     "Spiele": " | ".join(

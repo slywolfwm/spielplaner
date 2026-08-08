@@ -32,7 +32,10 @@ def test_save_list_and_delete_pair():
 
     saved = store.save_pairs(
         "2026-27",
-        [("Team B", "Team A"), ("Team A", "Team B")],
+        [
+            ("Team B", "Team A", "Niedrig"),
+            ("Team A", "Team B", "Hoch"),
+        ],
         "user-id",
     )
     pairs = store.list_pairs("2026-27")
@@ -41,7 +44,22 @@ def test_save_list_and_delete_pair():
     assert len(pairs) == 1
     assert pairs[0].team_a == "Team A"
     assert pairs[0].team_b == "Team B"
+    assert pairs[0].priority == "Niedrig"
     assert pairs[0].created_by == "user-id"
 
     store.delete_pair("2026-27", pairs[0].row_key)
     assert store.list_pairs("2026-27") == []
+
+
+def test_old_pair_without_priority_defaults_to_high():
+    table = FakeTableClient()
+    table.entities[("2026-27", "old")] = {
+        "PartitionKey": "2026-27",
+        "RowKey": "old",
+        "TeamA": "Team A",
+        "TeamB": "Team B",
+    }
+
+    pair = PairStore(table).list_pairs("2026-27")[0]
+
+    assert pair.priority == "Hoch"
