@@ -4,7 +4,7 @@ import test from "node:test";
 import worker from "../src/index.js";
 
 
-test("proxy forwards paths and preserves the public origin", async () => {
+test("proxy forwards paths and rewrites the public origin", async () => {
   const originalFetch = globalThis.fetch;
   const forwardedRequests = [];
   globalThis.fetch = async (request) => {
@@ -38,7 +38,7 @@ test("proxy forwards paths and preserves the public origin", async () => {
     );
     assert.equal(
       forwardedRequests[0].headers.get("Origin"),
-      "https://spielplaner.handamball.de",
+      "https://spielplaner-handamball.streamlit.app",
     );
     assert.equal(
       forwardedRequests[0].headers.get("X-Forwarded-Host"),
