@@ -186,15 +186,15 @@ def test_schedule_analysis_combines_rules_without_duplicate_pair_findings():
         frame,
         [team_a, team_b],
         {"a": 70, "b": 60},
-        [(team_a, team_b), (team_b, team_a)],
+        [(team_a, team_b, "Niedrig"), (team_b, team_a, "Hoch")],
     )
 
     assert list(result.columns) == ISSUE_COLUMNS
     assert len(result) == 2
-    assert result["Regel"].tolist() == [RULE_TEAM_OVERLAP, RULE_HOME_BUFFER]
-    assert result["Priorität"].tolist() == ["Hoch", "Mittel"]
-    assert "10 Min." in result.iloc[0]["Kommentar"]
-    assert "es fehlen 10 Min." in result.iloc[1]["Kommentar"]
+    assert result["Regel"].tolist() == [RULE_HOME_BUFFER, RULE_TEAM_OVERLAP]
+    assert result["Priorität"].tolist() == ["Mittel", "Niedrig"]
+    assert "es fehlen 10 Min." in result.iloc[0]["Kommentar"]
+    assert "10 Min." in result.iloc[1]["Kommentar"]
 
 
 def test_schedule_analysis_returns_stable_empty_table():

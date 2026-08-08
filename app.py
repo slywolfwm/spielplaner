@@ -20,6 +20,7 @@ from analysis import (
 )
 from duration_store import DurationStore
 from pair_store import PairStore, StoredPair
+from priorities import PRIORITY_LEVELS, normalize_priority
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -31,6 +32,20 @@ BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
 BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
 BRAND_FONT_BOLD = APP_DIR / "static" / "eras-bold.ttf"
+ANALYSIS_HELP = (
+    "Prüft den gesamten Spielplan auf Überschneidungen der festgelegten "
+    "Mannschaftspaare und auf fehlenden Puffer zwischen Heimspielen. Die "
+    "Ergebnisse werden nach Priorität sortiert."
+)
+DURATION_HELP = (
+    "Lege je Mannschaft die Regeldauer einschließlich Halbzeit und einen "
+    "zusätzlichen Unterbrechungspuffer fest. Vor jedem Spiel werden außerdem "
+    f"{PRE_GAME_BUFFER_MINUTES} Minuten Vorlauf berücksichtigt."
+)
+PAIR_HELP = (
+    "Lege Mannschaftspaare fest, deren Belegungszeiten sich nicht überschneiden "
+    "dürfen, und weise jedem Paar eine Priorität zu."
+)
 
 
 def configured_value(name: str, default: str = "") -> str:
@@ -130,8 +145,8 @@ def apply_brand_theme() -> None:
         + """
         :root {
             --brand-blue: #053782;
+            --brand-blue-hover: #022b66;
             --brand-red: #e00a1d;
-            --brand-red-hover: #bf0b1d;
             --brand-background: #f4f6fb;
             --brand-surface: #ffffff;
             --brand-line: #e5e7eb;
@@ -164,6 +179,9 @@ def apply_brand_theme() -> None:
         }
 
         [data-testid="stSidebarNav"] a {
+            display: inline-flex;
+            width: fit-content;
+            max-width: 100%;
             border-radius: var(--brand-button-radius);
             color: var(--brand-heading);
             font-family: var(--brand-font) !important;
@@ -228,13 +246,6 @@ def apply_brand_theme() -> None:
             line-height: 1;
         }
 
-        .spielplaner-masthead__meta {
-            margin: 0.35rem 0 0;
-            color: var(--brand-muted);
-            font-family: var(--brand-font) !important;
-            font-size: 0.95rem;
-        }
-
         .stButton > button,
         .stDownloadButton > button,
         [data-testid="stBaseButton-primary"],
@@ -246,14 +257,18 @@ def apply_brand_theme() -> None:
         }
 
         [data-testid="stBaseButton-primary"] {
-            border-color: var(--brand-red) !important;
-            background: var(--brand-red) !important;
+            border-color: var(--brand-blue) !important;
+            background: var(--brand-blue) !important;
+            color: #ffffff !important;
+        }
+
+        [data-testid="stBaseButton-primary"] p {
             color: #ffffff !important;
         }
 
         [data-testid="stBaseButton-primary"]:hover {
-            border-color: var(--brand-red-hover) !important;
-            background: var(--brand-red-hover) !important;
+            border-color: var(--brand-blue-hover) !important;
+            background: var(--brand-blue-hover) !important;
         }
 
         [data-testid="stBaseButton-secondary"] {
@@ -325,9 +340,6 @@ def show_brand_header() -> None:
         <div class="spielplaner-masthead">
             <p class="spielplaner-masthead__club">TSV Weilheim Handball</p>
             <h1>Spielplaner</h1>
-            <p class="spielplaner-masthead__meta">
-                TSV Weilheim und weibliche A-Jugend des BSC Oberhausen, Saison 2026/27
-            </p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -407,14 +419,18 @@ def load_saved_pairs() -> tuple[PairStore | None, list[StoredPair], str]:
 
 def pairs_for_analysis(
     saved_pairs: list[StoredPair],
-) -> tuple[list[tuple[Team, Team]], int]:
+) -> tuple[list[tuple[Team, Team, str]], int]:
     raw_pairs = list(st.session_state.get("manual_pairs", []))
-    raw_pairs.extend((pair.team_a, pair.team_b) for pair in saved_pairs)
-    result: list[tuple[Team, Team]] = []
+    raw_pairs.extend(
+        (pair.team_a, pair.team_b, pair.priority) for pair in saved_pairs
+    )
+    result: list[tuple[Team, Team, str]] = []
     seen: set[tuple[str, str]] = set()
     skipped = 0
 
-    for label_a, label_b in raw_pairs:
+    for pair in raw_pairs:
+        label_a, label_b = pair[:2]
+        priority = normalize_priority(pair[2] if len(pair) == 3 else None)
         if (
             label_a == label_b
             or label_a not in team_by_label
@@ -426,38 +442,14 @@ def pairs_for_analysis(
         if key in seen:
             continue
         seen.add(key)
-        result.append((team_by_label[label_a], team_by_label[label_b]))
+        result.append(
+            (team_by_label[label_a], team_by_label[label_b], priority)
+        )
     return result, skipped
 
 
 def show_analysis_page() -> None:
-    st.header("Spielplanprüfung")
-    st.caption(
-        "Alle aktiven Regeln werden auf den vollständigen Spielplan der enthaltenen "
-        "Mannschaften angewendet. Jeder gefundene Sachverhalt erscheint genau einmal."
-    )
-
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "Priorität": RULE_PRIORITIES[RULE_TEAM_OVERLAP],
-                    "Regel": RULE_TEAM_OVERLAP,
-                    "Prüfumfang": "Alle definierten Mannschaftspaare",
-                },
-                {
-                    "Priorität": RULE_PRIORITIES[RULE_HOME_BUFFER],
-                    "Regel": RULE_HOME_BUFFER,
-                    "Prüfumfang": (
-                        f"Alle Heimspiele; {PRE_GAME_BUFFER_MINUTES} Min. Vorlauf"
-                    ),
-                },
-            ]
-        ),
-        hide_index=True,
-        width="stretch",
-    )
-    st.caption("Hallenbuchungen werden in einer späteren Ausbaustufe geprüft.")
+    st.header("Spielplanprüfung", help=ANALYSIS_HELP)
 
     _, saved_pairs, pair_error = load_saved_pairs()
     if pair_error:
@@ -526,13 +518,7 @@ def show_analysis_page() -> None:
 
 
 def show_duration_page() -> None:
-    st.header("Spieldauern")
-    st.caption(
-        "Die Regeldauer umfasst beide Halbzeiten und die Halbzeitpause. Der separat "
-        "änderbare Unterbrechungspuffer berücksichtigt Time-outs und sonstige Stopps. "
-        f"Vor jedem Anwurf werden außerdem {PRE_GAME_BUFFER_MINUTES} Minuten Vorlauf "
-        "eingeplant."
-    )
+    st.header("Spieldauern", help=DURATION_HELP)
 
     duration_notice = st.session_state.pop("duration_notice", "")
     if duration_notice:
@@ -581,11 +567,6 @@ def show_duration_page() -> None:
             "extra_minutes": int(row["Unterbrechungspuffer (Min.)"]),
         }
 
-    st.caption(
-        "Für die Prüfungen wird die Summe aus Regeldauer und "
-        "Unterbrechungspuffer verwendet."
-    )
-
     if access.can_edit_pairings:
         if st.button(
             "Zeitwerte dauerhaft speichern",
@@ -624,19 +605,14 @@ def show_duration_page() -> None:
 
 
 def show_pair_page() -> None:
-    st.header("Mannschaftspaare")
-    st.caption(
-        "Lege Mannschaftspaare fest, deren Belegungszeiten sich nicht "
-        "überschneiden dürfen. Die Spielplanprüfung berücksichtigt automatisch "
-        "alle gültigen manuellen und für dich sichtbaren gespeicherten Paarungen."
-    )
+    st.header("Mannschaftspaare", help=PAIR_HELP)
 
     pair_count = st.number_input(
         "Anzahl der zu prüfenden Paare", min_value=1, max_value=20, value=1, step=1
     )
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, str, str]] = []
     for index in range(int(pair_count)):
-        col_a, col_b = st.columns(2)
+        col_a, col_b, col_priority = st.columns([1, 1, 0.62])
         default_b = min(index + 1, max(len(labels) - 1, 0))
         with col_a:
             label_a = st.selectbox(
@@ -651,7 +627,13 @@ def show_pair_page() -> None:
                 index=default_b,
                 key=f"team_b_{index}",
             )
-        pairs.append((label_a, label_b))
+        with col_priority:
+            priority = st.selectbox(
+                f"Paar {index + 1} · Priorität",
+                PRIORITY_LEVELS,
+                key=f"pair_priority_{index}",
+            )
+        pairs.append((label_a, label_b, priority))
 
     st.session_state["manual_pairs"] = pairs
     valid_manual_pairs = [pair for pair in pairs if pair[0] != pair[1]]
@@ -697,6 +679,7 @@ def show_pair_page() -> None:
                                 {
                                     "Mannschaft A": pair.team_a,
                                     "Mannschaft B": pair.team_b,
+                                    "Priorität": pair.priority,
                                 }
                                 for pair in stored_pairs
                             ]
@@ -746,6 +729,61 @@ def show_pair_page() -> None:
                             st.rerun()
 
 
+def show_guide_page() -> None:
+    st.header("Anleitung")
+    st.markdown(
+        "Der Spielplaner kontrolliert die Spiele des TSV Weilheim und der "
+        "weiblichen A-Jugend des BSC Oberhausen in der Saison 2026/27. Ein "
+        "aktualisierter nuLiga-Gesamtspielplan kann bei Bedarf als CSV hochgeladen "
+        "werden."
+    )
+
+    st.subheader("1. Mannschaftspaare festlegen")
+    st.markdown(
+        "Wähle zwei Mannschaften aus, deren Belegungszeiten sich nicht "
+        "überschneiden dürfen. Für jedes Paar kann die Priorität **Hoch**, "
+        "**Mittel** oder **Niedrig** festgelegt werden. Manuelle Paarungen gelten "
+        "für die aktuelle Sitzung; berechtigte Benutzer können sie dauerhaft "
+        "speichern."
+    )
+
+    st.subheader("2. Spieldauern prüfen")
+    st.markdown(
+        "Die Regeldauer umfasst beide Halbzeiten und die Halbzeitpause. Der "
+        "Unterbrechungspuffer berücksichtigt Time-outs und sonstige Stopps. Für "
+        f"die Prüfung wird beides addiert; vor jedem Anwurf werden zusätzlich "
+        f"{PRE_GAME_BUFFER_MINUTES} Minuten Vorlauf eingeplant."
+    )
+
+    st.subheader("3. Gesamten Spielplan prüfen")
+    st.markdown(
+        "Die Prüfung wendet alle aktiven Regeln auf den vollständigen Spielplan an "
+        "und gibt jeden Sachverhalt genau einmal aus. Die Ergebnistabelle ist nach "
+        "Priorität sortiert und kann als CSV heruntergeladen werden."
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Priorität": "Je Mannschaftspaar",
+                    "Regel": RULE_TEAM_OVERLAP,
+                    "Prüfumfang": "Alle definierten Mannschaftspaare",
+                },
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HOME_BUFFER],
+                    "Regel": RULE_HOME_BUFFER,
+                    "Prüfumfang": (
+                        f"Alle Heimspiele; {PRE_GAME_BUFFER_MINUTES} Min. Vorlauf"
+                    ),
+                },
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("Hallenbuchungen werden in einer späteren Ausbaustufe geprüft.")
+
+
 st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="wide")
 apply_brand_theme()
 st.logo(str(BRAND_LOGO), size="large")
@@ -769,6 +807,12 @@ page = st.navigation(
             title="Mannschaftspaare",
             icon=":material/group_work:",
             url_path="mannschaftspaare",
+        ),
+        st.Page(
+            show_guide_page,
+            title="Anleitung",
+            icon=":material/help:",
+            url_path="anleitung",
         ),
     ]
 )

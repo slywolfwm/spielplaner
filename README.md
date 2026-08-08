@@ -11,15 +11,18 @@ Unter Windows `start_app.bat` doppelt anklicken. Alternativ in PowerShell:
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Die Navigation teilt die App in drei Seiten auf:
+Die Navigation teilt die App in vier Seiten auf:
 
 - **Spielplanprüfung** wendet alle aktiven Regeln auf die vollständige Saison an
   und gibt eine priorisierte, kommentierte Ergebnistabelle aus.
 - **Spieldauern** verwaltet Regeldauer und Unterbrechungspuffer je Mannschaft.
-- **Mannschaftspaare** legt die Teams fest, die sich nicht überschneiden dürfen.
+- **Mannschaftspaare** legt die Teams fest, die sich nicht überschneiden dürfen,
+  und weist jedem Paar eine Priorität zu.
+- **Anleitung** bündelt die Erläuterungen zur Bedienung und zu den Prüfregeln.
 
-Aktuell sind zwei Regeln aktiv: Überschneidungen definierter Mannschaftspaare
-haben die Priorität **hoch**, ein fehlender Puffer zwischen Heimspielen die
+Aktuell sind zwei Regeln aktiv: Für Überschneidungen definierter
+Mannschaftspaare wird die Priorität je Paar als **hoch**, **mittel** oder
+**niedrig** festgelegt; ein fehlender Puffer zwischen Heimspielen hat die
 Priorität **mittel**. Die spätere Kontrolle der Hallenbuchungen ist noch nicht
 aktiv. Pro Auffälligkeit wird genau eine Zeile mit Datum, betroffenen Spielen,
 Halle und einer konkreten Erläuterung ausgegeben. Doppelte und umgekehrt
