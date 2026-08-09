@@ -4,6 +4,9 @@ import base64
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
+
+import jwt
 
 
 VIEWER_ROLE = "Pairings.Viewer"
@@ -103,6 +106,63 @@ def parse_oidc_user(user: Mapping[str, object] | None) -> UserAccess:
         object_id=object_id,
         roles=frozenset(roles),
         tenant_id=tenant_id,
+    )
+
+
+def validate_cloudflare_access_token(
+    token: str | None,
+    team_domain: str,
+    audience: str,
+    tenant_id: str,
+) -> UserAccess:
+    if not token or not team_domain or not audience:
+        return UserAccess()
+
+    issuer = team_domain.rstrip("/")
+    try:
+        signing_key = _cloudflare_jwk_client(issuer).get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=issuer,
+            options={"require": ["aud", "exp", "iss"]},
+        )
+    except jwt.PyJWTError:
+        return UserAccess()
+
+    return parse_cloudflare_access_claims(claims, tenant_id)
+
+
+def parse_cloudflare_access_claims(
+    claims: Mapping[str, object], tenant_id: str
+) -> UserAccess:
+    email = _first_mapping_value(claims, "email")
+    if claims.get("type") != "app" or not email:
+        return UserAccess()
+
+    custom_claims = claims.get("custom")
+    roles = set()
+    if isinstance(custom_claims, Mapping):
+        roles.update(_claim_values(custom_claims.get("roles")))
+
+    return UserAccess(
+        authenticated=True,
+        display_name=email,
+        object_id=_first_mapping_value(claims, "sub"),
+        roles=frozenset(roles),
+        tenant_id=tenant_id,
+    )
+
+
+@lru_cache(maxsize=4)
+def _cloudflare_jwk_client(team_domain: str) -> jwt.PyJWKClient:
+    return jwt.PyJWKClient(
+        f"{team_domain}/cdn-cgi/access/certs",
+        cache_keys=True,
+        lifespan=3600,
+        timeout=5,
     )
 
 

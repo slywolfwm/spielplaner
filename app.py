@@ -5,7 +5,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from access_control import UserAccess, parse_client_principal, parse_oidc_user
+from access_control import (
+    UserAccess,
+    parse_client_principal,
+    parse_oidc_user,
+    validate_cloudflare_access_token,
+)
 from analysis import (
     RULE_HOME_BUFFER,
     RULE_PRIORITIES,
@@ -29,6 +34,10 @@ DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
 SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
 DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
+DEFAULT_CLOUDFLARE_TEAM_DOMAIN = "https://sylvester-wolf.cloudflareaccess.com"
+DEFAULT_CLOUDFLARE_ACCESS_AUD = (
+    "b76b4cf99e8f9e8e1c3f75d46c5cd13a7a17e8473b98d816e1c5cc84d01f21c5"
+)
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
 BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
@@ -69,7 +78,18 @@ def oidc_auth_is_configured() -> bool:
         return False
 
 
-def current_user_access() -> tuple[UserAccess, bool]:
+def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
+    cloudflare_access = validate_cloudflare_access_token(
+        st.context.headers.get("Cf-Access-Jwt-Assertion"),
+        configured_value(
+            "CF_ACCESS_TEAM_DOMAIN", DEFAULT_CLOUDFLARE_TEAM_DOMAIN
+        ),
+        configured_value("CF_ACCESS_AUD", DEFAULT_CLOUDFLARE_ACCESS_AUD),
+        expected_tenant_id,
+    )
+    if cloudflare_access.authenticated:
+        return cloudflare_access, False
+
     app_service_access = parse_client_principal(
         st.context.headers.get("X-MS-CLIENT-PRINCIPAL")
     )
@@ -803,10 +823,10 @@ st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="
 apply_brand_theme()
 st.logo(str(BRAND_LOGO), size="large")
 oidc_configured = oidc_auth_is_configured()
-access, using_oidc = current_user_access()
 tenant_id = configured_value(
     "MICROSOFT_TENANT_ID", DEFAULT_MICROSOFT_TENANT_ID
 )
+access, using_oidc = current_user_access(tenant_id)
 require_tenant_access(tenant_id)
 page = st.navigation(
     [
