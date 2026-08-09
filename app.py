@@ -2,6 +2,7 @@ import os
 from base64 import b64encode
 from pathlib import Path
 from time import time
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -91,6 +92,13 @@ def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
         return cached_access[0], False
 
     proxy_proof = st.context.headers.get("X-Spielplaner-Access-Proof")
+    if not proxy_proof:
+        proxy_proof = st.context.cookies.get("Spielplaner_Access_Proof")
+    if not proxy_proof:
+        referer = st.context.headers.get("Referer", "")
+        proxy_proof = parse_qs(urlparse(referer).query).get(
+            "__access_proof", [None]
+        )[0]
     query_proxy_proof = st.query_params.get("__access_proof")
     if not proxy_proof:
         proxy_proof = query_proxy_proof

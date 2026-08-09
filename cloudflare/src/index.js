@@ -153,6 +153,9 @@ export default {
     }
     if (accessProof) {
       upstreamRequest.headers.set("X-Spielplaner-Access-Proof", accessProof);
+      const proofReferer = new URL(publicUrl.origin);
+      proofReferer.searchParams.set("__access_proof", accessProof);
+      upstreamRequest.headers.set("Referer", proofReferer.toString());
     }
 
     const upstreamResponse = await fetch(upstreamRequest);
