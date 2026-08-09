@@ -82,6 +82,8 @@ def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
     cloudflare_token = st.context.headers.get("Cf-Access-Jwt-Assertion")
     if not cloudflare_token:
         cloudflare_token = st.context.cookies.get("CF_Authorization")
+    if not cloudflare_token:
+        cloudflare_token = st.query_params.get("__cf_access_jwt")
 
     cloudflare_access = validate_cloudflare_access_token(
         cloudflare_token,

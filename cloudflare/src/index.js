@@ -13,8 +13,17 @@ export default {
     }
 
     const upstreamOrigin = new URL(env.UPSTREAM_ORIGIN);
+    const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     const upstreamPath = `/~/+${publicUrl.pathname}`;
-    const upstreamUrl = new URL(upstreamPath + publicUrl.search, upstreamOrigin);
+    const upstreamUrl = new URL(upstreamPath, upstreamOrigin);
+    for (const [name, value] of publicUrl.searchParams) {
+      if (name !== "__cf_access_jwt") {
+        upstreamUrl.searchParams.append(name, value);
+      }
+    }
+    if (accessJwt) {
+      upstreamUrl.searchParams.set("__cf_access_jwt", accessJwt);
+    }
     const upstreamRequest = new Request(upstreamUrl, request);
 
     if (upstreamRequest.headers.get("Origin") === publicUrl.origin) {
@@ -25,7 +34,6 @@ export default {
       "X-Forwarded-Proto",
       publicUrl.protocol.replace(":", ""),
     );
-    const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     if (accessJwt) {
       upstreamRequest.headers.set("Cf-Access-Jwt-Assertion", accessJwt);
     }
@@ -42,6 +50,7 @@ export default {
       if (locationUrl.origin === upstreamOrigin.origin) {
         locationUrl.pathname =
           locationUrl.pathname.replace(/^\/~\/\+/, "") || "/";
+        locationUrl.searchParams.delete("__cf_access_jwt");
         locationUrl.protocol = publicUrl.protocol;
         locationUrl.host = publicUrl.host;
         response.headers.set("Location", locationUrl.toString());

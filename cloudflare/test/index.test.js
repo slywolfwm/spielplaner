@@ -13,7 +13,8 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       return new Response(null, {
         status: 302,
         headers: {
-          Location: "https://spielplaner-handamball.streamlit.app/~/+/spieldauern",
+          Location:
+            "https://spielplaner-handamball.streamlit.app/~/+/spieldauern?__cf_access_jwt=should-not-leak",
         },
       });
     }
@@ -25,19 +26,22 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       UPSTREAM_ORIGIN: "https://spielplaner-handamball.streamlit.app",
     };
     const response = await worker.fetch(
-      new Request("https://spielplaner.handamball.de/mannschaftspaare?team=1", {
-        headers: {
-          Origin: "https://spielplaner.handamball.de",
-          "Cf-Access-Jwt-Assertion": "signed-access-token",
+      new Request(
+        "https://spielplaner.handamball.de/mannschaftspaare?team=1&__cf_access_jwt=forged",
+        {
+          headers: {
+            Origin: "https://spielplaner.handamball.de",
+            "Cf-Access-Jwt-Assertion": "signed-access-token",
+          },
         },
-      }),
+      ),
       env,
     );
 
     assert.equal(await response.text(), "ok");
     assert.equal(
       forwardedRequests[0].url,
-      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1",
+      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1&__cf_access_jwt=signed-access-token",
     );
     assert.equal(
       forwardedRequests[0].headers.get("Origin"),
