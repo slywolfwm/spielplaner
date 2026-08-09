@@ -56,6 +56,19 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       "signed-access-token",
     );
 
+    await worker.fetch(
+      new Request("https://spielplaner.handamball.de/_stcore/stream", {
+        headers: {
+          Cookie: "Spielplaner_Access_Proof=encrypted-proof",
+        },
+      }),
+      env,
+    );
+    assert.equal(
+      forwardedRequests[1].headers.get("X-Spielplaner-Access-Proof"),
+      "encrypted-proof",
+    );
+
     const redirect = await worker.fetch(
       new Request("https://spielplaner.handamball.de/redirect"),
       env,

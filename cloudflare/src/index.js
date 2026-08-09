@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 
 const jwksByTeam = new Map();
+const ACCESS_PROOF_COOKIE = "Spielplaner_Access_Proof";
 
 
 function getJwks(teamDomain) {
@@ -71,41 +72,63 @@ async function createAccessProof(payload, secret) {
 }
 
 
+function cookieValue(request, name) {
+  const cookieHeader = request.headers.get("Cookie") || "";
+  for (const part of cookieHeader.split(";")) {
+    const [cookieName, ...valueParts] = part.trim().split("=");
+    if (cookieName === name) {
+      return valueParts.join("=");
+    }
+  }
+  return "";
+}
+
+
 export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
     const upstreamOrigin = new URL(env.UPSTREAM_ORIGIN);
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
+    let accessProof = cookieValue(request, ACCESS_PROOF_COOKIE);
     const isDocument =
       request.method === "GET" &&
       (request.headers.get("Sec-Fetch-Dest") === "document" ||
         request.headers.get("Accept")?.includes("text/html"));
 
-    if (isDocument && !publicUrl.searchParams.has("__access_proof")) {
-      if (!accessJwt || !env.ACCESS_PROXY_SECRET) {
-        return new Response("Access authentication is incomplete", { status: 403 });
-      }
+    if (accessJwt && env.ACCESS_PROXY_SECRET) {
       try {
         const teamDomain = env.TEAM_DOMAIN.replace(/\/$/, "");
         const { payload } = await jwtVerify(accessJwt, getJwks(teamDomain), {
           issuer: teamDomain,
           audience: env.POLICY_AUD,
         });
-        const proof = await createAccessProof(payload, env.ACCESS_PROXY_SECRET);
+        accessProof = await createAccessProof(payload, env.ACCESS_PROXY_SECRET);
+      } catch {
+        if (isDocument) {
+          return new Response("Access authentication failed", { status: 403 });
+        }
+      }
+    }
+
+    if (isDocument && !publicUrl.searchParams.has("__access_proof")) {
+      if (!accessJwt || !env.ACCESS_PROXY_SECRET) {
+        return new Response("Access authentication is incomplete", { status: 403 });
+      }
+      if (accessProof) {
         const redirectUrl = new URL(publicUrl);
         redirectUrl.searchParams.delete("__cf_access_jwt");
-        redirectUrl.searchParams.set("__access_proof", proof);
+        redirectUrl.searchParams.set("__access_proof", accessProof);
         return new Response(null, {
           status: 302,
           headers: {
             Location: redirectUrl.toString(),
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
+            "Set-Cookie": `${ACCESS_PROOF_COOKIE}=${accessProof}; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax`,
           },
         });
-      } catch {
-        return new Response("Access authentication failed", { status: 403 });
       }
+      return new Response("Access authentication failed", { status: 403 });
     }
 
     const upstreamPath = `/~/+${publicUrl.pathname}`;
@@ -127,6 +150,9 @@ export default {
     );
     if (accessJwt) {
       upstreamRequest.headers.set("Cf-Access-Jwt-Assertion", accessJwt);
+    }
+    if (accessProof) {
+      upstreamRequest.headers.set("X-Spielplaner-Access-Proof", accessProof);
     }
 
     const upstreamResponse = await fetch(upstreamRequest);
