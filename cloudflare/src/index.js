@@ -171,7 +171,11 @@ export default {
         locationUrl.pathname =
           locationUrl.pathname.replace(/^\/~\/\+/, "") || "/";
         locationUrl.searchParams.delete("__cf_access_jwt");
-        locationUrl.searchParams.delete("__access_proof");
+        if (accessProof) {
+          locationUrl.searchParams.set("__access_proof", accessProof);
+        } else {
+          locationUrl.searchParams.delete("__access_proof");
+        }
         locationUrl.protocol = publicUrl.protocol;
         locationUrl.host = publicUrl.host;
         response.headers.set("Location", locationUrl.toString());

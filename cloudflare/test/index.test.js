@@ -83,6 +83,21 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       redirect.headers.get("Location"),
       "https://spielplaner.handamball.de/spieldauern",
     );
+
+    const authenticatedRedirect = await worker.fetch(
+      new Request("https://spielplaner.handamball.de/redirect", {
+        headers: {
+          Cookie: "Spielplaner_Access_Proof=encrypted-proof",
+        },
+      }),
+      env,
+    );
+    assert.equal(
+      new URL(authenticatedRedirect.headers.get("Location")).searchParams.get(
+        "__access_proof",
+      ),
+      "encrypted-proof",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
