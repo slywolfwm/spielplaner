@@ -26,7 +26,10 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     };
     const response = await worker.fetch(
       new Request("https://spielplaner.handamball.de/mannschaftspaare?team=1", {
-        headers: { Origin: "https://spielplaner.handamball.de" },
+        headers: {
+          Origin: "https://spielplaner.handamball.de",
+          "Cf-Access-Jwt-Assertion": "signed-access-token",
+        },
       }),
       env,
     );
@@ -43,6 +46,10 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     assert.equal(
       forwardedRequests[0].headers.get("X-Forwarded-Host"),
       "spielplaner.handamball.de",
+    );
+    assert.equal(
+      forwardedRequests[0].headers.get("Cf-Access-Jwt-Assertion"),
+      "signed-access-token",
     );
 
     const redirect = await worker.fetch(

@@ -14,6 +14,10 @@ export default {
       "X-Forwarded-Proto",
       publicUrl.protocol.replace(":", ""),
     );
+    const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
+    if (accessJwt) {
+      upstreamRequest.headers.set("Cf-Access-Jwt-Assertion", accessJwt);
+    }
 
     const upstreamResponse = await fetch(upstreamRequest);
     if (upstreamResponse.status === 101) {
