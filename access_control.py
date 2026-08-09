@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 VIEWER_ROLE = "Pairings.Viewer"
@@ -115,7 +119,11 @@ def validate_cloudflare_access_token(
     audience: str,
     tenant_id: str,
 ) -> UserAccess:
-    if not token or not team_domain or not audience:
+    if not token:
+        LOGGER.warning("Cloudflare Access JWT is missing")
+        return UserAccess()
+    if not team_domain or not audience:
+        LOGGER.warning("Cloudflare Access JWT configuration is incomplete")
         return UserAccess()
 
     issuer = team_domain.rstrip("/")
@@ -129,10 +137,17 @@ def validate_cloudflare_access_token(
             issuer=issuer,
             options={"require": ["aud", "exp", "iss"]},
         )
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as exc:
+        LOGGER.warning(
+            "Cloudflare Access JWT validation failed: %s",
+            type(exc).__name__,
+        )
         return UserAccess()
 
-    return parse_cloudflare_access_claims(claims, tenant_id)
+    access = parse_cloudflare_access_claims(claims, tenant_id)
+    if not access.authenticated:
+        LOGGER.warning("Cloudflare Access JWT has no identity-based app claims")
+    return access
 
 
 def parse_cloudflare_access_claims(
