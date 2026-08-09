@@ -95,6 +95,11 @@ def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
     if not proxy_proof:
         proxy_proof = st.context.cookies.get("Spielplaner_Access_Proof")
     if not proxy_proof:
+        context_url = str(getattr(st.context, "url", "") or "")
+        proxy_proof = parse_qs(urlparse(context_url).query).get(
+            "__access_proof", [None]
+        )[0]
+    if not proxy_proof:
         referer = st.context.headers.get("Referer", "")
         proxy_proof = parse_qs(urlparse(referer).query).get(
             "__access_proof", [None]
@@ -950,3 +955,4 @@ if connection_string:
 
 duration_settings = initialize_duration_settings()
 page.run()
+
