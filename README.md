@@ -87,10 +87,12 @@ Einträge in den Streamlit-Secrets:
   ist `teamdurations`
 - `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden
   dürfen
+- `CF_ACCESS_TEAM_DOMAIN`: Cloudflare-Access-Team-Domain
+- `CF_ACCESS_AUD`: Audience-Tag der geschützten Cloudflare-Access-Anwendung
 
-In Azure App Service muss Microsoft Entra als Identitätsanbieter eingerichtet
-sein. Die App kontrolliert Anmeldung und Tenant zusätzlich selbst, bevor sie
-Navigation, Upload oder Spielplandaten anzeigt.
+Cloudflare Access übernimmt vor der eigenen Domain die Microsoft-Anmeldung. Die
+App prüft zusätzlich Signatur, Aussteller und Audience des von Cloudflare
+übermittelten JWT, bevor sie Navigation, Upload oder Spielplandaten anzeigt.
 
 ## Streamlit Community Cloud und eigene Domain
 
