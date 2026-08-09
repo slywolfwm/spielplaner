@@ -90,7 +90,10 @@ def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
     ):
         return cached_access[0], False
 
-    proxy_proof = st.query_params.get("__access_proof")
+    proxy_proof = st.context.headers.get("X-Spielplaner-Access-Proof")
+    query_proxy_proof = st.query_params.get("__access_proof")
+    if not proxy_proof:
+        proxy_proof = query_proxy_proof
     proxy_access, expires_at = validate_proxy_access_proof(
         proxy_proof,
         configured_value("ACCESS_PROXY_SECRET"),
@@ -98,10 +101,10 @@ def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
     )
     if proxy_access.authenticated:
         st.session_state["cloudflare_access"] = (proxy_access, expires_at)
-        if "__access_proof" in st.query_params:
+        if query_proxy_proof and "__access_proof" in st.query_params:
             del st.query_params["__access_proof"]
         return proxy_access, False
-    if proxy_proof and "__access_proof" in st.query_params:
+    if query_proxy_proof and "__access_proof" in st.query_params:
         del st.query_params["__access_proof"]
 
     cloudflare_token = st.context.headers.get("Cf-Access-Jwt-Assertion")
