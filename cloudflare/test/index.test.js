@@ -68,21 +68,3 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     globalThis.fetch = originalFetch;
   }
 });
-
-test("access diagnostics expose only presence flags", async () => {
-  const response = await worker.fetch(
-    new Request("https://spielplaner.handamball.de/__access-diagnostics", {
-      headers: {
-        Cookie: "CF_Authorization=sensitive-cookie",
-        "Cf-Access-Jwt-Assertion": "sensitive-token",
-      },
-    }),
-    {},
-  );
-
-  assert.deepEqual(await response.json(), {
-    jwt: true,
-    email: false,
-    cookie: true,
-  });
-});

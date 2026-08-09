@@ -1,17 +1,6 @@
 export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
-    if (publicUrl.pathname === "/__access-diagnostics") {
-      const cookie = request.headers.get("Cookie") || "";
-      return Response.json({
-        jwt: Boolean(request.headers.get("Cf-Access-Jwt-Assertion")),
-        email: Boolean(
-          request.headers.get("Cf-Access-Authenticated-User-Email"),
-        ),
-        cookie: cookie.includes("CF_Authorization="),
-      });
-    }
-
     const upstreamOrigin = new URL(env.UPSTREAM_ORIGIN);
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     const upstreamPath = `/~/+${publicUrl.pathname}`;
