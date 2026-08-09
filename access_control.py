@@ -179,22 +179,32 @@ def validate_proxy_access_proof(
     secret: str,
     tenant_id: str,
 ) -> tuple[UserAccess, int]:
-    if not proof or not secret:
+    if not proof:
+        LOGGER.warning("Proxy access proof is missing")
+        return UserAccess(), 0
+    if not secret:
+        LOGGER.warning("Proxy access secret is missing")
         return UserAccess(), 0
 
     try:
         key = _decode_base64url(secret)
         encrypted = _decode_base64url(proof)
         if len(key) != 32 or len(encrypted) < 29:
+            LOGGER.warning("Proxy access proof configuration is invalid")
             return UserAccess(), 0
         payload = json.loads(
             AESGCM(key).decrypt(encrypted[:12], encrypted[12:], None)
         )
         expires_at = int(payload.get("exp", 0))
-    except (InvalidTag, ValueError, TypeError):
+    except InvalidTag:
+        LOGGER.warning("Proxy access proof authentication failed")
+        return UserAccess(), 0
+    except (ValueError, TypeError):
+        LOGGER.warning("Proxy access proof is malformed")
         return UserAccess(), 0
 
     if expires_at <= int(time.time()):
+        LOGGER.warning("Proxy access proof is expired")
         return UserAccess(), 0
     return parse_cloudflare_access_claims(payload, tenant_id), expires_at
 
