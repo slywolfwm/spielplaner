@@ -17,6 +17,8 @@ WebSocket-Verbindungen werden an
    - `CLOUDFLARE_API_TOKEN` mit den Berechtigungen `Workers Scripts: Edit` und
      `Workers Routes: Edit` für die Zone `handamball.de`
    - `CLOUDFLARE_ACCOUNT_ID` mit der Cloudflare-Konto-ID
+   - `ACCESS_PROXY_SECRET` als zufälligen 32-Byte-Schlüssel in Base64URL; genau
+     derselbe Wert muss in den Streamlit-Secrets stehen
 
 4. Den Workflow **Cloudflare-Proxy bereitstellen** in GitHub Actions starten.
 

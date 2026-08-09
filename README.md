@@ -89,10 +89,15 @@ Einträge in den Streamlit-Secrets:
   dürfen
 - `CF_ACCESS_TEAM_DOMAIN`: Cloudflare-Access-Team-Domain
 - `CF_ACCESS_AUD`: Audience-Tag der geschützten Cloudflare-Access-Anwendung
+- `ACCESS_PROXY_SECRET`: gemeinsamer zufälliger 32-Byte-Schlüssel in Base64URL;
+  als Streamlit-Secret und gleichnamiges GitHub-Actions-Secret hinterlegen
 
 Cloudflare Access übernimmt vor der eigenen Domain die Microsoft-Anmeldung. Die
 App prüft zusätzlich Signatur, Aussteller und Audience des von Cloudflare
-übermittelten JWT, bevor sie Navigation, Upload oder Spielplandaten anzeigt.
+übermittelten JWT. Da Streamlit Community Cloud Access-Header vor der
+Python-Sitzung entfernt, überträgt der Worker daraus eine kurzlebige,
+AES-GCM-verschlüsselte Zugriffsbestätigung. Erst danach zeigt die App Navigation,
+Upload oder Spielplandaten an.
 
 ## Streamlit Community Cloud und eigene Domain
 

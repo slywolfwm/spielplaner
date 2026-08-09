@@ -41,7 +41,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     assert.equal(await response.text(), "ok");
     assert.equal(
       forwardedRequests[0].url,
-      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1&__cf_access_jwt=signed-access-token",
+      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1",
     );
     assert.equal(
       forwardedRequests[0].headers.get("Origin"),

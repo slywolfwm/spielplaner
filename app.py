@@ -1,6 +1,7 @@
 import os
 from base64 import b64encode
 from pathlib import Path
+from time import time
 
 import pandas as pd
 import streamlit as st
@@ -10,6 +11,7 @@ from access_control import (
     parse_client_principal,
     parse_oidc_user,
     validate_cloudflare_access_token,
+    validate_proxy_access_proof,
 )
 from analysis import (
     RULE_HOME_BUFFER,
@@ -79,6 +81,29 @@ def oidc_auth_is_configured() -> bool:
 
 
 def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
+    cached_access = st.session_state.get("cloudflare_access")
+    if (
+        isinstance(cached_access, tuple)
+        and len(cached_access) == 2
+        and isinstance(cached_access[0], UserAccess)
+        and int(cached_access[1]) > int(time())
+    ):
+        return cached_access[0], False
+
+    proxy_proof = st.query_params.get("__access_proof")
+    proxy_access, expires_at = validate_proxy_access_proof(
+        proxy_proof,
+        configured_value("ACCESS_PROXY_SECRET"),
+        expected_tenant_id,
+    )
+    if proxy_access.authenticated:
+        st.session_state["cloudflare_access"] = (proxy_access, expires_at)
+        if "__access_proof" in st.query_params:
+            del st.query_params["__access_proof"]
+        return proxy_access, False
+    if proxy_proof and "__access_proof" in st.query_params:
+        del st.query_params["__access_proof"]
+
     cloudflare_token = st.context.headers.get("Cf-Access-Jwt-Assertion")
     if not cloudflare_token:
         cloudflare_token = st.context.cookies.get("CF_Authorization")
