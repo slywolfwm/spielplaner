@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 LOGGER = logging.getLogger(__name__)
@@ -171,6 +174,31 @@ def parse_cloudflare_access_claims(
     )
 
 
+def validate_proxy_access_proof(
+    proof: str | None,
+    secret: str,
+    tenant_id: str,
+) -> tuple[UserAccess, int]:
+    if not proof or not secret:
+        return UserAccess(), 0
+
+    try:
+        key = _decode_base64url(secret)
+        encrypted = _decode_base64url(proof)
+        if len(key) != 32 or len(encrypted) < 29:
+            return UserAccess(), 0
+        payload = json.loads(
+            AESGCM(key).decrypt(encrypted[:12], encrypted[12:], None)
+        )
+        expires_at = int(payload.get("exp", 0))
+    except (InvalidTag, ValueError, TypeError):
+        return UserAccess(), 0
+
+    if expires_at <= int(time.time()):
+        return UserAccess(), 0
+    return parse_cloudflare_access_claims(payload, tenant_id), expires_at
+
+
 @lru_cache(maxsize=4)
 def _cloudflare_jwk_client(team_domain: str) -> jwt.PyJWKClient:
     return jwt.PyJWKClient(
@@ -179,6 +207,11 @@ def _cloudflare_jwk_client(team_domain: str) -> jwt.PyJWKClient:
         lifespan=3600,
         timeout=5,
     )
+
+
+def _decode_base64url(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
 
 
 def _first_claim(values: dict[str, list[str]], *claim_types: str) -> str:

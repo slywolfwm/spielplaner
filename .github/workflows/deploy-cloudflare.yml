@@ -18,3 +18,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: cloudflare
           wranglerVersion: "4.120.0"
+          secrets: |
+            ACCESS_PROXY_SECRET
+        env:
+          ACCESS_PROXY_SECRET: ${{ secrets.ACCESS_PROXY_SECRET }}

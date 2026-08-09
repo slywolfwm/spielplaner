@@ -1,8 +1,10 @@
 import base64
 import json
+import os
 from time import time
 
 import jwt
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from access_control import (
@@ -13,6 +15,7 @@ from access_control import (
     parse_client_principal,
     parse_oidc_user,
     validate_cloudflare_access_token,
+    validate_proxy_access_proof,
 )
 
 
@@ -207,3 +210,65 @@ def test_cloudflare_token_requires_valid_signature_issuer_and_audience(monkeypat
     assert access.can_view_pairings
     assert not access.can_edit_pairings
     assert not wrong_audience.authenticated
+
+
+def encode_proxy_proof(payload: dict[str, object], key: bytes) -> str:
+    nonce = os.urandom(12)
+    encrypted = nonce + AESGCM(key).encrypt(
+        nonce, json.dumps(payload).encode(), None
+    )
+    return base64.urlsafe_b64encode(encrypted).rstrip(b"=").decode()
+
+
+def test_proxy_access_proof_is_authenticated_and_expires():
+    key = os.urandom(32)
+    secret = base64.urlsafe_b64encode(key).rstrip(b"=").decode()
+    expires_at = int(time()) + 60
+    proof = encode_proxy_proof(
+        {
+            "type": "app",
+            "email": "editor@example.com",
+            "sub": "cloudflare-user-id",
+            "custom": {"roles": [EDITOR_ROLE]},
+            "exp": expires_at,
+        },
+        key,
+    )
+
+    access, returned_expiry = validate_proxy_access_proof(
+        proof, secret, "tenant-id"
+    )
+
+    assert access.can_edit_pairings
+    assert access.belongs_to_tenant("tenant-id")
+    assert returned_expiry == expires_at
+
+
+def test_proxy_access_proof_rejects_tampering_and_expiry():
+    key = os.urandom(32)
+    secret = base64.urlsafe_b64encode(key).rstrip(b"=").decode()
+    expired = encode_proxy_proof(
+        {
+            "type": "app",
+            "email": "editor@example.com",
+            "custom": {"roles": [EDITOR_ROLE]},
+            "exp": int(time()) - 1,
+        },
+        key,
+    )
+    valid = encode_proxy_proof(
+        {
+            "type": "app",
+            "email": "editor@example.com",
+            "exp": int(time()) + 60,
+        },
+        key,
+    )
+    tampered = valid[:-1] + ("A" if valid[-1] != "A" else "B")
+
+    assert not validate_proxy_access_proof(
+        expired, secret, "tenant-id"
+    )[0].authenticated
+    assert not validate_proxy_access_proof(
+        tampered, secret, "tenant-id"
+    )[0].authenticated
