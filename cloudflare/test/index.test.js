@@ -9,7 +9,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
   const forwardedRequests = [];
   globalThis.fetch = async (request) => {
     forwardedRequests.push(request);
-    if (new URL(request.url).pathname === "/~/+/redirect") {
+    if (new URL(request.url).pathname === "/redirect") {
       return new Response(null, {
         status: 302,
         headers: {
@@ -41,7 +41,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     assert.equal(await response.text(), "ok");
     assert.equal(
       forwardedRequests[0].url,
-      "https://spielplaner-handamball.streamlit.app/~/+/mannschaftspaare?team=1",
+      "https://spielplaner-handamball.streamlit.app/mannschaftspaare?team=1",
     );
     assert.equal(
       forwardedRequests[0].headers.get("Origin"),
@@ -68,12 +68,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       forwardedRequests[1].headers.get("X-Spielplaner-Access-Proof"),
       "encrypted-proof",
     );
-    assert.equal(
-      new URL(forwardedRequests[1].headers.get("Referer")).searchParams.get(
-        "__access_proof",
-      ),
-      "encrypted-proof",
-    );
+    assert.equal(forwardedRequests[1].headers.get("Referer"), null);
 
     const redirect = await worker.fetch(
       new Request("https://spielplaner.handamball.de/redirect"),
@@ -97,6 +92,52 @@ test("proxy forwards paths and rewrites the public origin", async () => {
         "__access_proof",
       ),
       "encrypted-proof",
+    );
+
+    globalThis.fetch = async (request) => {
+      forwardedRequests.push(request);
+      return new Response(null, {
+        status: 303,
+        headers: [
+          [
+            "Location",
+            "https://spielplaner-handamball.streamlit.app/-/login?code=test",
+          ],
+          [
+            "Set-Cookie",
+            "streamlit_session=test; Domain=.streamlit.io; Path=/; Secure; HttpOnly",
+          ],
+        ],
+      });
+    };
+    const authRedirect = await worker.fetch(
+      new Request(
+        "https://spielplaner.handamball.de/-/auth/app?__access_proof=encrypted-proof",
+        {
+          headers: {
+            Cookie: "Spielplaner_Access_Proof=encrypted-proof",
+          },
+        },
+      ),
+      env,
+    );
+    assert.equal(
+      forwardedRequests.at(-1).url,
+      "https://share.streamlit.io/-/auth/app?__access_proof=encrypted-proof",
+    );
+    assert.equal(
+      new URL(authRedirect.headers.get("Location")).origin,
+      "https://spielplaner.handamball.de",
+    );
+    assert.equal(
+      authRedirect.headers.get("Set-Cookie").includes("Domain="),
+      false,
+    );
+    assert.equal(
+      authRedirect.headers.get("Set-Cookie").startsWith(
+        "__sp_auth_streamlit_session=",
+      ),
+      true,
     );
   } finally {
     globalThis.fetch = originalFetch;

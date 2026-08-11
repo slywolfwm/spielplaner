@@ -3,6 +3,9 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const jwksByTeam = new Map();
 const ACCESS_PROOF_COOKIE = "Spielplaner_Access_Proof";
+const STREAMLIT_AUTH_ORIGIN = "https://share.streamlit.io";
+const STREAMLIT_APP_COOKIE_PREFIX = "__sp_app_";
+const STREAMLIT_AUTH_COOKIE_PREFIX = "__sp_auth_";
 
 
 function getJwks(teamDomain) {
@@ -84,10 +87,62 @@ function cookieValue(request, name) {
 }
 
 
+function setCookieValues(headers) {
+  if (typeof headers.getSetCookie === "function") {
+    return headers.getSetCookie();
+  }
+  if (typeof headers.getAll === "function") {
+    return headers.getAll("Set-Cookie");
+  }
+  const value = headers.get("Set-Cookie");
+  return value ? [value] : [];
+}
+
+
+function upstreamCookieHeader(request, prefix) {
+  const cookieHeader = request.headers.get("Cookie") || "";
+  const cookies = [];
+  for (const part of cookieHeader.split(";")) {
+    const trimmed = part.trim();
+    const separator = trimmed.indexOf("=");
+    if (separator < 1) {
+      continue;
+    }
+    const name = trimmed.slice(0, separator);
+    if (name.startsWith(prefix)) {
+      cookies.push(`${name.slice(prefix.length)}${trimmed.slice(separator)}`);
+    }
+  }
+  return cookies.join("; ");
+}
+
+
+function rewriteSetCookies(response, cookies, prefix) {
+  if (!cookies.length) {
+    return;
+  }
+  response.headers.delete("Set-Cookie");
+  for (const cookie of cookies) {
+    const separator = cookie.indexOf("=");
+    if (separator < 1) {
+      continue;
+    }
+    response.headers.append(
+      "Set-Cookie",
+      `${prefix}${cookie.slice(0, separator)}${cookie.slice(separator)}`.replace(
+        /;\s*Domain=[^;]+/gi,
+        "",
+      ),
+    );
+  }
+}
+
+
 export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
     const upstreamOrigin = new URL(env.UPSTREAM_ORIGIN);
+    const streamlitAuthOrigin = new URL(STREAMLIT_AUTH_ORIGIN);
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     let accessProof = cookieValue(request, ACCESS_PROOF_COOKIE);
     const isDocument =
@@ -131,17 +186,28 @@ export default {
       return new Response("Access authentication failed", { status: 403 });
     }
 
-    const upstreamPath = `/~/+${publicUrl.pathname}`;
-    const upstreamUrl = new URL(upstreamPath, upstreamOrigin);
+    const targetOrigin = publicUrl.pathname.startsWith("/-/auth/")
+      ? streamlitAuthOrigin
+      : upstreamOrigin;
+    const cookiePrefix = targetOrigin.origin === streamlitAuthOrigin.origin
+      ? STREAMLIT_AUTH_COOKIE_PREFIX
+      : STREAMLIT_APP_COOKIE_PREFIX;
+    const upstreamUrl = new URL(publicUrl.pathname, targetOrigin);
     for (const [name, value] of publicUrl.searchParams) {
       if (name !== "__cf_access_jwt") {
         upstreamUrl.searchParams.append(name, value);
       }
     }
     const upstreamRequest = new Request(upstreamUrl, request);
+    const upstreamCookies = upstreamCookieHeader(request, cookiePrefix);
+    if (upstreamCookies) {
+      upstreamRequest.headers.set("Cookie", upstreamCookies);
+    } else {
+      upstreamRequest.headers.delete("Cookie");
+    }
 
     if (upstreamRequest.headers.get("Origin") === publicUrl.origin) {
-      upstreamRequest.headers.set("Origin", upstreamOrigin.origin);
+      upstreamRequest.headers.set("Origin", targetOrigin.origin);
     }
     upstreamRequest.headers.set("X-Forwarded-Host", publicUrl.host);
     upstreamRequest.headers.set(
@@ -153,21 +219,25 @@ export default {
     }
     if (accessProof) {
       upstreamRequest.headers.set("X-Spielplaner-Access-Proof", accessProof);
-      const proofReferer = new URL(publicUrl.origin);
-      proofReferer.searchParams.set("__access_proof", accessProof);
-      upstreamRequest.headers.set("Referer", proofReferer.toString());
     }
 
-    const upstreamResponse = await fetch(upstreamRequest);
+    const upstreamResponse = await fetch(upstreamRequest, {
+      redirect: "manual",
+    });
     if (upstreamResponse.status === 101) {
       return upstreamResponse;
     }
 
+    const responseCookies = setCookieValues(upstreamResponse.headers);
     const response = new Response(upstreamResponse.body, upstreamResponse);
+    rewriteSetCookies(response, responseCookies, cookiePrefix);
     const location = response.headers.get("Location");
     if (location) {
-      const locationUrl = new URL(location, upstreamOrigin);
-      if (locationUrl.origin === upstreamOrigin.origin) {
+      const locationUrl = new URL(location, targetOrigin);
+      if (
+        locationUrl.origin === upstreamOrigin.origin ||
+        locationUrl.origin === streamlitAuthOrigin.origin
+      ) {
         locationUrl.pathname =
           locationUrl.pathname.replace(/^\/~\/\+/, "") || "/";
         locationUrl.searchParams.delete("__cf_access_jwt");
@@ -183,7 +253,7 @@ export default {
     }
 
     if (
-      response.headers.get("Access-Control-Allow-Origin") === upstreamOrigin.origin
+      response.headers.get("Access-Control-Allow-Origin") === targetOrigin.origin
     ) {
       response.headers.set("Access-Control-Allow-Origin", publicUrl.origin);
     }
