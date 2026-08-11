@@ -169,6 +169,30 @@ async function rewriteStreamlitRouterScript(
 }
 
 
+async function rewriteStreamlitShell(response) {
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!contentType.includes("text/html")) {
+    return response;
+  }
+
+  const html = await response.text();
+  const rewritten = html.replace(
+    /src=(["'])(\/-\/build\/assets\/[^"']+\.js)\1/g,
+    'src=$1$2?__sp_router=2$1',
+  );
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Encoding");
+  headers.delete("Content-Length");
+  headers.delete("ETag");
+  headers.set("Cache-Control", "no-store");
+  return new Response(rewritten, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+
 export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
@@ -289,8 +313,9 @@ export default {
       response.headers.set("Access-Control-Allow-Origin", publicUrl.origin);
     }
     response.headers.set("Referrer-Policy", "no-referrer");
+    const shellResponse = await rewriteStreamlitShell(response);
     return rewriteStreamlitRouterScript(
-      response,
+      shellResponse,
       publicUrl,
       upstreamOrigin,
     );
