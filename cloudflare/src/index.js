@@ -138,6 +138,37 @@ function rewriteSetCookies(response, cookies, prefix) {
 }
 
 
+async function rewriteStreamlitRouterScript(
+  response,
+  publicUrl,
+  upstreamOrigin,
+) {
+  const contentType = response.headers.get("Content-Type") || "";
+  if (
+    !publicUrl.pathname.startsWith("/-/build/assets/") ||
+    !contentType.includes("javascript")
+  ) {
+    return response;
+  }
+
+  const script = await response.text();
+  const rewritten = script.replaceAll(
+    "window.location.hostname",
+    JSON.stringify(upstreamOrigin.hostname),
+  );
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Encoding");
+  headers.delete("Content-Length");
+  headers.delete("ETag");
+  headers.set("Cache-Control", "no-store");
+  return new Response(rewritten, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+
 export default {
   async fetch(request, env) {
     const publicUrl = new URL(request.url);
@@ -209,7 +240,7 @@ export default {
     if (upstreamRequest.headers.get("Origin") === publicUrl.origin) {
       upstreamRequest.headers.set("Origin", targetOrigin.origin);
     }
-    upstreamRequest.headers.set("X-Forwarded-Host", publicUrl.host);
+    upstreamRequest.headers.set("X-Forwarded-Host", targetOrigin.host);
     upstreamRequest.headers.set(
       "X-Forwarded-Proto",
       publicUrl.protocol.replace(":", ""),
@@ -258,6 +289,10 @@ export default {
       response.headers.set("Access-Control-Allow-Origin", publicUrl.origin);
     }
     response.headers.set("Referrer-Policy", "no-referrer");
-    return response;
+    return rewriteStreamlitRouterScript(
+      response,
+      publicUrl,
+      upstreamOrigin,
+    );
   },
 };
