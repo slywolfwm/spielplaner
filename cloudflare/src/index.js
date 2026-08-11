@@ -152,10 +152,15 @@ async function rewriteStreamlitRouterScript(
   }
 
   const script = await response.text();
-  const rewritten = script.replaceAll(
-    "window.location.hostname",
-    JSON.stringify(upstreamOrigin.hostname),
-  );
+  const rewritten = script
+    .replaceAll(
+      "window.location.hostname",
+      JSON.stringify(upstreamOrigin.hostname),
+    )
+    .replace(
+      /(["'])(\.\/|assets\/)([^"'?]+\.js)\1/g,
+      '$1$2$3?__sp_router=3$1',
+    );
   const headers = new Headers(response.headers);
   headers.delete("Content-Encoding");
   headers.delete("Content-Length");
@@ -178,7 +183,7 @@ async function rewriteStreamlitShell(response) {
   const html = await response.text();
   const rewritten = html.replace(
     /src=(["'])(\/-\/build\/assets\/[^"']+\.js)\1/g,
-    'src=$1$2?__sp_router=2$1',
+    'src=$1$2?__sp_router=3$1',
   );
   const headers = new Headers(response.headers);
   headers.delete("Content-Encoding");
