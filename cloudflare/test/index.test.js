@@ -49,7 +49,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     );
     assert.equal(
       forwardedRequests[0].headers.get("X-Forwarded-Host"),
-      "spielplaner.handamball.de",
+      "spielplaner-handamball.streamlit.app",
     );
     assert.equal(
       forwardedRequests[0].headers.get("Cf-Access-Jwt-Assertion"),
@@ -138,6 +138,28 @@ test("proxy forwards paths and rewrites the public origin", async () => {
         "__sp_auth_streamlit_session=",
       ),
       true,
+    );
+
+    globalThis.fetch = async (request) => {
+      forwardedRequests.push(request);
+      return new Response(
+        "const host = window.location.hostname;",
+        {
+          headers: {
+            "Content-Type": "application/javascript",
+          },
+        },
+      );
+    };
+    const routerScript = await worker.fetch(
+      new Request(
+        "https://spielplaner.handamball.de/-/build/assets/router.js",
+      ),
+      env,
+    );
+    assert.equal(
+      await routerScript.text(),
+      'const host = "spielplaner-handamball.streamlit.app";',
     );
   } finally {
     globalThis.fetch = originalFetch;
