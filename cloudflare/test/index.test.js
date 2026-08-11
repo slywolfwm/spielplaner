@@ -143,7 +143,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     globalThis.fetch = async (request) => {
       forwardedRequests.push(request);
       return new Response(
-        "const host = window.location.hostname;",
+        'import "./subdomain.js"; const host = window.location.hostname;',
         {
           headers: {
             "Content-Type": "application/javascript",
@@ -159,7 +159,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     );
     assert.equal(
       await routerScript.text(),
-      'const host = "spielplaner-handamball.streamlit.app";',
+      'import "./subdomain.js?__sp_router=3"; const host = "spielplaner-handamball.streamlit.app";',
     );
 
     globalThis.fetch = async (request) => {
@@ -179,7 +179,7 @@ test("proxy forwards paths and rewrites the public origin", async () => {
     );
     assert.equal(
       await shell.text(),
-      '<script type="module" src="/-/build/assets/index.js?__sp_router=2"></script>',
+      '<script type="module" src="/-/build/assets/index.js?__sp_router=3"></script>',
     );
   } finally {
     globalThis.fetch = originalFetch;
