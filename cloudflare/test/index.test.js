@@ -161,6 +161,26 @@ test("proxy forwards paths and rewrites the public origin", async () => {
       await routerScript.text(),
       'const host = "spielplaner-handamball.streamlit.app";',
     );
+
+    globalThis.fetch = async (request) => {
+      forwardedRequests.push(request);
+      return new Response(
+        '<script type="module" src="/-/build/assets/index.js"></script>',
+        {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+          },
+        },
+      );
+    };
+    const shell = await worker.fetch(
+      new Request("https://spielplaner.handamball.de/"),
+      env,
+    );
+    assert.equal(
+      await shell.text(),
+      '<script type="module" src="/-/build/assets/index.js?__sp_router=2"></script>',
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
