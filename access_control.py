@@ -2,18 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import lru_cache
-
-import jwt
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 VIEWER_ROLE = "Pairings.Viewer"
@@ -114,114 +104,6 @@ def parse_oidc_user(user: Mapping[str, object] | None) -> UserAccess:
         roles=frozenset(roles),
         tenant_id=tenant_id,
     )
-
-
-def validate_cloudflare_access_token(
-    token: str | None,
-    team_domain: str,
-    audience: str,
-    tenant_id: str,
-) -> UserAccess:
-    if not token:
-        LOGGER.warning("Cloudflare Access JWT is missing")
-        return UserAccess()
-    if not team_domain or not audience:
-        LOGGER.warning("Cloudflare Access JWT configuration is incomplete")
-        return UserAccess()
-
-    issuer = team_domain.rstrip("/")
-    try:
-        signing_key = _cloudflare_jwk_client(issuer).get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=audience,
-            issuer=issuer,
-            options={"require": ["aud", "exp", "iss"]},
-        )
-    except jwt.PyJWTError as exc:
-        LOGGER.warning(
-            "Cloudflare Access JWT validation failed: %s",
-            type(exc).__name__,
-        )
-        return UserAccess()
-
-    access = parse_cloudflare_access_claims(claims, tenant_id)
-    if not access.authenticated:
-        LOGGER.warning("Cloudflare Access JWT has no identity-based app claims")
-    return access
-
-
-def parse_cloudflare_access_claims(
-    claims: Mapping[str, object], tenant_id: str
-) -> UserAccess:
-    email = _first_mapping_value(claims, "email")
-    if claims.get("type") != "app" or not email:
-        return UserAccess()
-
-    custom_claims = claims.get("custom")
-    roles = set()
-    if isinstance(custom_claims, Mapping):
-        roles.update(_claim_values(custom_claims.get("roles")))
-
-    return UserAccess(
-        authenticated=True,
-        display_name=email,
-        object_id=_first_mapping_value(claims, "sub"),
-        roles=frozenset(roles),
-        tenant_id=tenant_id,
-    )
-
-
-def validate_proxy_access_proof(
-    proof: str | None,
-    secret: str,
-    tenant_id: str,
-) -> tuple[UserAccess, int]:
-    if not proof:
-        LOGGER.warning("Proxy access proof is missing")
-        return UserAccess(), 0
-    if not secret:
-        LOGGER.warning("Proxy access secret is missing")
-        return UserAccess(), 0
-
-    try:
-        key = _decode_base64url(secret)
-        encrypted = _decode_base64url(proof)
-        if len(key) != 32 or len(encrypted) < 29:
-            LOGGER.warning("Proxy access proof configuration is invalid")
-            return UserAccess(), 0
-        payload = json.loads(
-            AESGCM(key).decrypt(encrypted[:12], encrypted[12:], None)
-        )
-        expires_at = int(payload.get("exp", 0))
-    except InvalidTag:
-        LOGGER.warning("Proxy access proof authentication failed")
-        return UserAccess(), 0
-    except (ValueError, TypeError):
-        LOGGER.warning("Proxy access proof is malformed")
-        return UserAccess(), 0
-
-    if expires_at <= int(time.time()):
-        LOGGER.warning("Proxy access proof is expired")
-        return UserAccess(), 0
-    return parse_cloudflare_access_claims(payload, tenant_id), expires_at
-
-
-@lru_cache(maxsize=4)
-def _cloudflare_jwk_client(team_domain: str) -> jwt.PyJWKClient:
-    return jwt.PyJWKClient(
-        f"{team_domain}/cdn-cgi/access/certs",
-        cache_keys=True,
-        lifespan=3600,
-        timeout=5,
-    )
-
-
-def _decode_base64url(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(value + padding)
 
 
 def _first_claim(values: dict[str, list[str]], *claim_types: str) -> str:

@@ -78,8 +78,7 @@ Microsoft-Entra-App-Rollen den Zugriff auf dauerhaft gespeicherte Einstellungen:
   Spieldauern dauerhaft ändern
 
 Paarungen und Spieldauern werden in Azure Table Storage gespeichert. Dafür
-benötigt die App folgende Umgebungsvariablen beziehungsweise gleichnamige
-Einträge in den Streamlit-Secrets:
+benötigt der Azure App Service folgende Umgebungsvariablen:
 
 - `AZURE_STORAGE_CONNECTION_STRING`: Verbindungszeichenfolge des Storage Accounts
 - `AZURE_TABLE_NAME`: optionaler Tabellenname, Standard ist `teampairs`
@@ -87,44 +86,30 @@ Einträge in den Streamlit-Secrets:
   ist `teamdurations`
 - `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden
   dürfen
-- `CF_ACCESS_TEAM_DOMAIN`: Cloudflare-Access-Team-Domain
-- `CF_ACCESS_AUD`: Audience-Tag der geschützten Cloudflare-Access-Anwendung
-- `ACCESS_PROXY_SECRET`: gemeinsamer zufälliger 32-Byte-Schlüssel in Base64URL;
-  als Streamlit-Secret und gleichnamiges GitHub-Actions-Secret hinterlegen
-
-Cloudflare Access übernimmt vor der eigenen Domain die Microsoft-Anmeldung. Die
-App prüft zusätzlich Signatur, Aussteller und Audience des von Cloudflare
-übermittelten JWT. Da Streamlit Community Cloud Access-Header vor der
-Python-Sitzung entfernt, überträgt der Worker daraus eine kurzlebige,
-AES-GCM-verschlüsselte Zugriffsbestätigung. Erst danach zeigt die App Navigation,
-Upload oder Spielplandaten an.
-
-## Streamlit Community Cloud und eigene Domain
-
-Für die geplante Bereitstellung wird die App aus dem Branch `main` auf
-Streamlit Community Cloud veröffentlicht. Repository und Einstiegspunkt sind:
-
-- Repository: `slywolfwm/spielplaner`
-- Branch: `main`
-- App-Datei: `app.py`
-- gewünschte Streamlit-URL: `spielplaner-handamball.streamlit.app`
-
-Die Inhalte aus `.streamlit/secrets.toml.example` werden in den App-Einstellungen
-unter **Secrets** mit den echten Azure- und Entra-Werten hinterlegt. Die Datei
-`secrets.toml` selbst darf nicht in Git eingecheckt werden.
-
-Die Microsoft-Entra-App benötigt als Web-Weiterleitungs-URI:
-
-```text
-https://spielplaner.handamball.de/oauth2callback
-```
-
-Der Cloudflare Worker im Ordner `cloudflare` veröffentlicht die Streamlit-App
-unter `https://spielplaner.handamball.de`. Die Befehle und Voraussetzungen für
-das Deployment stehen in `cloudflare/README.md`.
 
 ## Azure App Service
 
-Die App ist für einen Linux App Service vorbereitet. Als Startbefehl in Azure
-`startup.sh` eintragen. Azure installiert die Python-Pakete aus der
+Die App läuft im Linux App Service `spielplaner-handamball-azure` und ist unter
+`https://spielplaner.handamball.de` erreichbar. Als Startbefehl ist
+`bash startup.sh` konfiguriert. Azure installiert die Python-Pakete aus der
 `requirements.txt` im Stammverzeichnis des Repositorys.
+
+Microsoft Entra wird über App Service Authentication (Easy Auth) vorgeschaltet.
+Die Entra-App-Registrierung benötigt die beiden Web-Weiterleitungs-URIs:
+
+```text
+https://spielplaner-handamball-azure.azurewebsites.net/.auth/login/aad/callback
+https://spielplaner.handamball.de/.auth/login/aad/callback
+```
+
+Der Aussteller ist
+`https://login.microsoftonline.com/c0cba668-b196-49f4-b4e8-36af0e1cc1bd/v2.0`.
+In der App-Registrierung muss die Ausgabe von ID-Token für Hybridflows aktiviert
+sein. App Service Authentication verlangt eine Anmeldung und akzeptiert nur
+Token aus dem konfigurierten Tenant.
+
+Jeder Push auf `main` führt die Tests aus und stellt die App über
+`.github/workflows/main_spielplaner-handamball-azure.yml` bereit. Für lokale
+Entwicklung kann `.streamlit/secrets.toml.example` kopiert und mit einer lokalen
+OIDC-Weiterleitungs-URI verwendet werden; `secrets.toml` darf nicht in Git
+eingecheckt werden.

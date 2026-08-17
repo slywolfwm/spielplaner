@@ -1,8 +1,6 @@
 import os
 from base64 import b64encode
 from pathlib import Path
-from time import time
-from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -11,8 +9,6 @@ from access_control import (
     UserAccess,
     parse_client_principal,
     parse_oidc_user,
-    validate_cloudflare_access_token,
-    validate_proxy_access_proof,
 )
 from analysis import (
     RULE_HOME_BUFFER,
@@ -37,10 +33,6 @@ DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
 SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
 DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
-DEFAULT_CLOUDFLARE_TEAM_DOMAIN = "https://sylvester-wolf.cloudflareaccess.com"
-DEFAULT_CLOUDFLARE_ACCESS_AUD = (
-    "b76b4cf99e8f9e8e1c3f75d46c5cd13a7a17e8473b98d816e1c5cc84d01f21c5"
-)
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
 BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
@@ -81,62 +73,7 @@ def oidc_auth_is_configured() -> bool:
         return False
 
 
-def current_user_access(expected_tenant_id: str) -> tuple[UserAccess, bool]:
-    cached_access = st.session_state.get("cloudflare_access")
-    if (
-        isinstance(cached_access, tuple)
-        and len(cached_access) == 2
-        and isinstance(cached_access[0], UserAccess)
-        and int(cached_access[1]) > int(time())
-    ):
-        return cached_access[0], False
-
-    proxy_proof = st.context.headers.get("X-Spielplaner-Access-Proof")
-    if not proxy_proof:
-        proxy_proof = st.context.cookies.get("Spielplaner_Access_Proof")
-    if not proxy_proof:
-        context_url = str(getattr(st.context, "url", "") or "")
-        proxy_proof = parse_qs(urlparse(context_url).query).get(
-            "__access_proof", [None]
-        )[0]
-    if not proxy_proof:
-        referer = st.context.headers.get("Referer", "")
-        proxy_proof = parse_qs(urlparse(referer).query).get(
-            "__access_proof", [None]
-        )[0]
-    query_proxy_proof = st.query_params.get("__access_proof")
-    if not proxy_proof:
-        proxy_proof = query_proxy_proof
-    proxy_access, expires_at = validate_proxy_access_proof(
-        proxy_proof,
-        configured_value("ACCESS_PROXY_SECRET"),
-        expected_tenant_id,
-    )
-    if proxy_access.authenticated:
-        st.session_state["cloudflare_access"] = (proxy_access, expires_at)
-        if query_proxy_proof and "__access_proof" in st.query_params:
-            del st.query_params["__access_proof"]
-        return proxy_access, False
-    if query_proxy_proof and "__access_proof" in st.query_params:
-        del st.query_params["__access_proof"]
-
-    cloudflare_token = st.context.headers.get("Cf-Access-Jwt-Assertion")
-    if not cloudflare_token:
-        cloudflare_token = st.context.cookies.get("CF_Authorization")
-    if not cloudflare_token:
-        cloudflare_token = st.query_params.get("__cf_access_jwt")
-
-    cloudflare_access = validate_cloudflare_access_token(
-        cloudflare_token,
-        configured_value(
-            "CF_ACCESS_TEAM_DOMAIN", DEFAULT_CLOUDFLARE_TEAM_DOMAIN
-        ),
-        configured_value("CF_ACCESS_AUD", DEFAULT_CLOUDFLARE_ACCESS_AUD),
-        expected_tenant_id,
-    )
-    if cloudflare_access.authenticated:
-        return cloudflare_access, False
-
+def current_user_access(_expected_tenant_id: str) -> tuple[UserAccess, bool]:
     app_service_access = parse_client_principal(
         st.context.headers.get("X-MS-CLIENT-PRINCIPAL")
     )
