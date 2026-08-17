@@ -1,0 +1,41 @@
+name: Deploy Spielplaner to Azure App Service
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v5
+
+      - name: Python 3.14 einrichten
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: Tests ausführen
+        run: python -m pytest -q
+
+      - name: Azure App Service bereitstellen
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: spielplaner-handamball-azure
+          slot-name: production
+          publish-profile: ${{ secrets.AzureAppService_PublishProfile_e96fa757a31249ddb994dd88f137b7dc }}
+          package: .
