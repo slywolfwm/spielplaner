@@ -74,8 +74,11 @@ Hallen. Eine Verbindung wird nur dann live abgefragt, wenn
 4. die Spiele in unterschiedlichen Hallen stattfinden und
 5. zwischen beiden Fenstern höchstens acht Stunden liegen.
 
-Die Richtung folgt der tatsächlichen Spielabfolge. Azure Maps geocodiert die
-beiden Hallenadressen und berechnet die schnellste Route unter Berücksichtigung
+Die Richtung folgt der tatsächlichen Spielabfolge. Für die vier TSV-Spielstätten
+werden die offiziellen nuLiga-Straßenadressen verwendet; andere nuLiga-Hallennamen
+werden über den Ortsteil vor dem Komma innerhalb Bayerns aufgelöst. Dadurch kann
+ein mehrdeutiger Ortsname wie Weilheim nicht in einem anderen Bundesland landen.
+Azure Maps berechnet anschließend die schnellste Route unter Berücksichtigung
 des Verkehrs. Für die Planungszeit addiert die App standardmäßig 15 Prozent
 Sicherheitszuschlag und 10 Minuten für Parkplatz und Weg in die Halle und rundet
 anschließend auf fünf Minuten auf.

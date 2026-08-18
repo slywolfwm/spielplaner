@@ -13,6 +13,13 @@ import httpx
 AZURE_MAPS_ENDPOINT = "https://atlas.microsoft.com"
 AZURE_MAPS_API_VERSION = "2025-01-01"
 MAX_CACHE_AGE = timedelta(days=180)
+BAVARIA_BBOX = "8.8,47.2,13.9,50.6"
+KNOWN_HALL_ADDRESSES = {
+    "huglfing, sporthalle an der seeleite": "Seeleite, 82386 Huglfing",
+    "peißenberg, glückauf-halle": "Alpspitzstrasse 11, 82380 Peißenberg",
+    "weilheim, am hardt": "Hardtkapellenstrasse 2, 82362 Weilheim in Oberbayern",
+    "weilheim, jahnhalle": "Jahnstrasse 2, 82362 Weilheim in Oberbayern",
+}
 
 
 class AzureMapsError(RuntimeError):
@@ -95,14 +102,27 @@ class AzureMapsClient:
         )
 
     def _geocode(self, address: str) -> tuple[float, float]:
+        known_address = KNOWN_HALL_ADDRESSES.get(_hall_lookup_key(address))
+        params: dict[str, object] = {
+            "api-version": AZURE_MAPS_API_VERSION,
+            "top": 1,
+        }
+        if known_address:
+            params["query"] = _german_address(known_address)
+        else:
+            # nuLiga exports a hall label rather than a street address. Resolving
+            # the locality within Bavaria avoids ambiguous names such as Weilheim.
+            params.update(
+                {
+                    "locality": _hall_locality(address),
+                    "countryRegion": "DE",
+                    "bbox": BAVARIA_BBOX,
+                }
+            )
         try:
             response = self.http_client.get(
                 f"{AZURE_MAPS_ENDPOINT}/geocode",
-                params={
-                    "api-version": AZURE_MAPS_API_VERSION,
-                    "query": _german_address(address),
-                    "top": 1,
-                },
+                params=params,
                 headers=self._headers(),
             )
             response.raise_for_status()
@@ -210,3 +230,11 @@ def _german_address(value: str) -> str:
     if "deutschland" not in address.casefold():
         return f"{address}, Deutschland"
     return address
+
+
+def _hall_locality(value: str) -> str:
+    return value.split(",", 1)[0].strip()
+
+
+def _hall_lookup_key(value: str) -> str:
+    return " ".join(value.strip().casefold().split())

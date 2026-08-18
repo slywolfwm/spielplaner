@@ -13,7 +13,7 @@ def test_azure_route_geocodes_and_uses_traffic_with_conservative_rounding():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/geocode":
-            captured["geocodes"].append(request.url.params["query"])
+            captured["geocodes"].append(dict(request.url.params))
             longitude, latitude = next(coordinates)
             return httpx.Response(
                 200,
@@ -67,14 +67,80 @@ def test_azure_route_geocodes_and_uses_traffic_with_conservative_rounding():
     assert body["departAt"] == "2026-10-11T12:00:00+00:00"
     assert body["features"][0]["geometry"]["coordinates"] == [11.1, 47.7]
     assert captured["geocodes"] == [
-        "Murnau, James-Loeb-Halle, Deutschland",
-        "Schongau, Lechsporthalle, Deutschland",
+        {
+            "api-version": "2025-01-01",
+            "top": "1",
+            "locality": "Murnau",
+            "countryRegion": "DE",
+            "bbox": "8.8,47.2,13.9,50.6",
+        },
+        {
+            "api-version": "2025-01-01",
+            "top": "1",
+            "locality": "Schongau",
+            "countryRegion": "DE",
+            "bbox": "8.8,47.2,13.9,50.6",
+        },
     ]
     assert captured["headers"]["subscription-key"] == "secret-key"
     assert result.source_minutes == 61
     assert result.planning_minutes == 85
     assert result.distance_meters == 42000
     assert result.valid_until == datetime(2026, 8, 18, 13, 0, tzinfo=timezone.utc)
+
+
+def test_known_home_hall_uses_exact_street_address():
+    captured: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/geocode":
+            captured.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={
+                    "features": [
+                        {
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [11.14, 47.84],
+                            },
+                            "properties": {"geocodePoints": []},
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "features": [
+                    {
+                        "properties": {
+                            "durationInSeconds": 600,
+                            "distanceInMeters": 5000,
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = AzureMapsClient(
+        "secret-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.compute_route("Weilheim, Jahnhalle", "Weilheim, Am Hardt")
+
+    assert captured == [
+        {
+            "api-version": "2025-01-01",
+            "top": "1",
+            "query": "Jahnstrasse 2, 82362 Weilheim in Oberbayern, Deutschland",
+        },
+        {
+            "api-version": "2025-01-01",
+            "top": "1",
+            "query": "Hardtkapellenstrasse 2, 82362 Weilheim in Oberbayern, Deutschland",
+        },
+    ]
 
 
 def test_azure_route_failure_does_not_expose_subscription_key():
