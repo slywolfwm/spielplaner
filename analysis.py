@@ -30,10 +30,35 @@ ISSUE_COLUMNS = [
 ]
 RULE_TEAM_OVERLAP = "Überschneidung Mannschaftspaar"
 RULE_HOME_BUFFER = "Puffer zwischen Heimspielen"
+RULE_TRAVEL_TIME = "Fahrzeit zwischen Spielen"
 RULE_PRIORITIES = {
     RULE_TEAM_OVERLAP: "Hoch",
     RULE_HOME_BUFFER: "Mittel",
 }
+
+TRAVEL_LEG_COLUMNS = [
+    "Priorität",
+    "Datum",
+    "Team früher",
+    "Gegner früher",
+    "Spielort früher",
+    "Spiel früher",
+    "Anwurf früher",
+    "Abfahrt",
+    "Team später",
+    "Gegner später",
+    "Spielort später",
+    "Spiel später",
+    "Anwurf später",
+    "Vorbereitung ab",
+    "Verfügbar (Min.)",
+    "Startschlüssel",
+    "Starthalle",
+    "Startadresse",
+    "Zielschlüssel",
+    "Zielhalle",
+    "Zieladresse",
+]
 
 
 @dataclass(frozen=True)
@@ -320,12 +345,124 @@ def find_home_game_buffer_conflicts(
     return pd.DataFrame(conflicts, columns=columns)
 
 
+def find_relevant_travel_legs(
+    frame: pd.DataFrame,
+    team_pairs: list[tuple[Team, Team] | tuple[Team, Team, str]],
+    duration_by_team_key: dict[str, int],
+    pre_buffer_minutes: int = 30,
+    max_gap_minutes: int = 480,
+) -> pd.DataFrame:
+    """Return only same-day routes that could constrain a configured team pair."""
+    legs: list[dict[str, object]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    pre_buffer = pd.Timedelta(minutes=pre_buffer_minutes)
+    hall_catalog = _hall_catalog(frame)
+
+    for pair in team_pairs:
+        team_a, team_b = pair[:2]
+        priority = normalize_priority(pair[2] if len(pair) == 3 else None)
+        pair_key = tuple(sorted((team_a.key, team_b.key)))
+        if team_a.key == team_b.key or pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+
+        games_a = games_for_team(frame, team_a)
+        games_b = games_for_team(frame, team_b)
+        duration_a = pd.Timedelta(minutes=duration_by_team_key[team_a.key])
+        duration_b = pd.Timedelta(minutes=duration_by_team_key[team_b.key])
+
+        for _, game_a in games_a.iterrows():
+            for _, game_b in games_b.iterrows():
+                if game_a["Anwurf"].date() != game_b["Anwurf"].date():
+                    continue
+
+                a_start = game_a["Anwurf"] - pre_buffer
+                a_end = game_a["Anwurf"] + duration_a
+                b_start = game_b["Anwurf"] - pre_buffer
+                b_end = game_b["Anwurf"] + duration_b
+                if a_start < b_end and b_start < a_end:
+                    continue
+
+                if game_a["Anwurf"] <= game_b["Anwurf"]:
+                    earlier_team, earlier_game, earlier_end = team_a, game_a, a_end
+                    later_team, later_game, later_start = team_b, game_b, b_start
+                else:
+                    earlier_team, earlier_game, earlier_end = team_b, game_b, b_end
+                    later_team, later_game, later_start = team_a, game_a, a_start
+
+                available_minutes = int(
+                    (later_start - earlier_end).total_seconds() // 60
+                )
+                if available_minutes < 0 or available_minutes > max_gap_minutes:
+                    continue
+
+                origin_key, origin_name, origin_address = _hall_identity(
+                    earlier_game, hall_catalog
+                )
+                destination_key, destination_name, destination_address = (
+                    _hall_identity(later_game, hall_catalog)
+                )
+                if not origin_key or not destination_key or origin_key == destination_key:
+                    continue
+
+                legs.append(
+                    {
+                        "Priorität": priority,
+                        "Datum": earlier_game["Anwurf"].date(),
+                        "Team früher": earlier_team.label,
+                        "Gegner früher": _opponent_series(earlier_game, earlier_team),
+                        "Spielort früher": _home_or_away_series(
+                            earlier_game, earlier_team
+                        ),
+                        "Spiel früher": _meeting_series(earlier_game),
+                        "Anwurf früher": earlier_game["Anwurf"],
+                        "Abfahrt": earlier_end,
+                        "Team später": later_team.label,
+                        "Gegner später": _opponent_series(later_game, later_team),
+                        "Spielort später": _home_or_away_series(
+                            later_game, later_team
+                        ),
+                        "Spiel später": _meeting_series(later_game),
+                        "Anwurf später": later_game["Anwurf"],
+                        "Vorbereitung ab": later_start,
+                        "Verfügbar (Min.)": available_minutes,
+                        "Startschlüssel": origin_key,
+                        "Starthalle": origin_name,
+                        "Startadresse": origin_address,
+                        "Zielschlüssel": destination_key,
+                        "Zielhalle": destination_name,
+                        "Zieladresse": destination_address,
+                    }
+                )
+
+    if not legs:
+        return pd.DataFrame(columns=TRAVEL_LEG_COLUMNS)
+    return (
+        pd.DataFrame(legs, columns=TRAVEL_LEG_COLUMNS)
+        .drop_duplicates(
+            subset=[
+                "Team früher",
+                "Team später",
+                "Anwurf früher",
+                "Anwurf später",
+                "Startschlüssel",
+                "Zielschlüssel",
+            ]
+        )
+        .sort_values(
+            ["Verfügbar (Min.)", "Anwurf früher", "Anwurf später"],
+            ignore_index=True,
+        )
+    )
+
+
 def analyze_schedule(
     frame: pd.DataFrame,
     teams: list[Team],
     duration_by_team_key: dict[str, int],
     team_pairs: list[tuple[Team, Team] | tuple[Team, Team, str]],
     pre_buffer_minutes: int = 30,
+    travel_minutes_by_leg: dict[tuple[str, str, str], int] | None = None,
 ) -> pd.DataFrame:
     """Run all active rules and return one concise row per finding."""
     findings: list[dict[str, object]] = []
@@ -412,6 +549,49 @@ def analyze_schedule(
                 }
             )
 
+    for _, leg in find_relevant_travel_legs(
+        frame,
+        team_pairs,
+        duration_by_team_key,
+        pre_buffer_minutes,
+    ).iterrows():
+        leg_key = travel_leg_key(
+            leg["Startschlüssel"], leg["Zielschlüssel"], leg["Abfahrt"]
+        )
+        planning_minutes = (travel_minutes_by_leg or {}).get(leg_key)
+        if planning_minutes is None or planning_minutes <= leg["Verfügbar (Min.)"]:
+            continue
+        missing_minutes = planning_minutes - leg["Verfügbar (Min.)"]
+        findings.append(
+            {
+                "Priorität": leg["Priorität"],
+                "Regel": RULE_TRAVEL_TIME,
+                "Datum": leg["Datum"],
+                "Spiele": " | ".join(
+                    (
+                        _game_summary(
+                            leg["Anwurf früher"],
+                            leg["Team früher"],
+                            leg["Gegner früher"],
+                            leg["Spielort früher"],
+                        ),
+                        _game_summary(
+                            leg["Anwurf später"],
+                            leg["Team später"],
+                            leg["Gegner später"],
+                            leg["Spielort später"],
+                        ),
+                    )
+                ),
+                "Halle": f"{leg['Starthalle']} → {leg['Zielhalle']}",
+                "Kommentar": (
+                    f"Verfügbar: {leg['Verfügbar (Min.)']} Min.; konservative "
+                    f"Fahrzeit: {planning_minutes} Min.; es fehlen "
+                    f"{missing_minutes} Min."
+                ),
+            }
+        )
+
     if not findings:
         return pd.DataFrame(columns=ISSUE_COLUMNS)
 
@@ -426,6 +606,10 @@ def analyze_schedule(
 
 def _meeting(row: object) -> str:
     return f"{row.Heimmannschaft} – {row.Gastmannschaft}"
+
+
+def _meeting_series(row: pd.Series) -> str:
+    return f"{row['Heimmannschaft']} – {row['Gastmannschaft']}"
 
 
 def _hall(row: object) -> str:
@@ -457,6 +641,54 @@ def _opponent(row: object, team: Team) -> str:
 
 def _home_or_away(row: object, team: Team) -> str:
     return "gegen" if row.Heimmannschaft == team.club_name else "bei"
+
+
+def _opponent_series(row: pd.Series, team: Team) -> str:
+    if row["Heimmannschaft"] == team.club_name:
+        return str(row["Gastmannschaft"])
+    return str(row["Heimmannschaft"])
+
+
+def _home_or_away_series(row: pd.Series, team: Team) -> str:
+    return "gegen" if row["Heimmannschaft"] == team.club_name else "bei"
+
+
+def _hall_identity(
+    row: pd.Series, hall_catalog: dict[str, str]
+) -> tuple[str, str, str]:
+    hall_number = str(row.get("Hallennummer", "")).strip()
+    hall_address = str(row.get("Inhalt Tooltip Halle", "")).strip()
+    if not hall_address and hall_number:
+        hall_address = hall_catalog.get(hall_number, "")
+    hall_key = hall_number or _normalized_hall(hall_address)
+    hall_name = hall_address or hall_number
+    return hall_key, hall_name, hall_address
+
+
+def _hall_catalog(frame: pd.DataFrame) -> dict[str, str]:
+    catalog: dict[str, str] = {}
+    for hall_number, hall_name in frame[
+        ["Hallennummer", "Inhalt Tooltip Halle"]
+    ].itertuples(index=False, name=None):
+        number = str(hall_number).strip()
+        name = str(hall_name).strip()
+        if number and name:
+            catalog.setdefault(number, name)
+    return catalog
+
+
+def _normalized_hall(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
+
+
+def travel_leg_key(
+    origin_key: object, destination_key: object, departure: object
+) -> tuple[str, str, str]:
+    return (
+        str(origin_key),
+        str(destination_key),
+        pd.Timestamp(departure).isoformat(),
+    )
 
 
 def _game_summary(

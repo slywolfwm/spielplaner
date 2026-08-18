@@ -4,6 +4,7 @@ from analysis import (
     ISSUE_COLUMNS,
     RULE_HOME_BUFFER,
     RULE_TEAM_OVERLAP,
+    RULE_TRAVEL_TIME,
     Team,
     analyze_schedule,
     available_teams,
@@ -11,7 +12,9 @@ from analysis import (
     default_stoppage_buffer,
     find_home_game_buffer_conflicts,
     find_overlaps,
+    find_relevant_travel_legs,
     home_game_blocks,
+    travel_leg_key,
 )
 
 
@@ -215,3 +218,90 @@ def test_schedule_analysis_returns_stable_empty_table():
 
     assert result.empty
     assert list(result.columns) == ISSUE_COLUMNS
+
+
+def _travel_test_data(second_kickoff: str = "2026-10-11 14:30"):
+    frame = pd.DataFrame(
+        [
+            {
+                "Anwurf": pd.Timestamp("2026-10-11 12:00"),
+                "Hallennummer": "100",
+                "Inhalt Tooltip Halle": "Murnau, James-Loeb-Halle",
+                "Spielnummer": "1",
+                "Liga": "A",
+                "Staffelkurzbezeichnung": "A1",
+                "Heimmannschaft": "Gegner 1",
+                "Gastmannschaft": "TSV Weilheim",
+            },
+            {
+                "Anwurf": pd.Timestamp(second_kickoff),
+                "Hallennummer": "200",
+                "Inhalt Tooltip Halle": "Schongau, Lechsporthalle",
+                "Spielnummer": "2",
+                "Liga": "B",
+                "Staffelkurzbezeichnung": "B1",
+                "Heimmannschaft": "Gegner 2",
+                "Gastmannschaft": "BSC Oberhausen",
+            },
+        ]
+    )
+    team_a = Team("a", "TSV Weilheim – A", "TSV Weilheim", "A", "A1")
+    team_b = Team("b", "BSC Oberhausen – B", "BSC Oberhausen", "B", "B1")
+    return frame, team_a, team_b
+
+
+def test_relevant_travel_leg_is_directional_and_same_day_only():
+    frame, team_a, team_b = _travel_test_data()
+
+    legs = find_relevant_travel_legs(
+        frame,
+        [(team_a, team_b, "Niedrig")],
+        {"a": 70, "b": 70},
+    )
+
+    assert len(legs) == 1
+    assert legs.iloc[0]["Startschlüssel"] == "100"
+    assert legs.iloc[0]["Zielschlüssel"] == "200"
+    assert legs.iloc[0]["Verfügbar (Min.)"] == 50
+    assert legs.iloc[0]["Priorität"] == "Niedrig"
+
+    next_day = frame.copy()
+    next_day.loc[1, "Anwurf"] += pd.Timedelta(days=1)
+    assert find_relevant_travel_legs(
+        next_day, [(team_a, team_b)], {"a": 70, "b": 70}
+    ).empty
+
+
+def test_overlapping_windows_and_same_hall_need_no_route():
+    frame, team_a, team_b = _travel_test_data("2026-10-11 13:20")
+    assert find_relevant_travel_legs(
+        frame, [(team_a, team_b)], {"a": 70, "b": 70}
+    ).empty
+
+    frame, team_a, team_b = _travel_test_data()
+    frame.loc[1, "Hallennummer"] = "100"
+    frame.loc[1, "Inhalt Tooltip Halle"] = "Murnau, James-Loeb-Halle"
+    assert find_relevant_travel_legs(
+        frame, [(team_a, team_b)], {"a": 70, "b": 70}
+    ).empty
+
+
+def test_schedule_analysis_flags_insufficient_travel_time_with_pair_priority():
+    frame, team_a, team_b = _travel_test_data()
+    departure = pd.Timestamp("2026-10-11 13:10")
+
+    result = analyze_schedule(
+        frame,
+        [team_a, team_b],
+        {"a": 70, "b": 70},
+        [(team_a, team_b, "Niedrig")],
+        travel_minutes_by_leg={
+            travel_leg_key("100", "200", departure): 65,
+        },
+    )
+
+    assert len(result) == 1
+    assert result.iloc[0]["Regel"] == RULE_TRAVEL_TIME
+    assert result.iloc[0]["Priorität"] == "Niedrig"
+    assert "konservative Fahrzeit: 65 Min." in result.iloc[0]["Kommentar"]
+    assert "es fehlen 15 Min." in result.iloc[0]["Kommentar"]

@@ -14,17 +14,21 @@ from analysis import (
     RULE_HOME_BUFFER,
     RULE_PRIORITIES,
     RULE_TEAM_OVERLAP,
+    RULE_TRAVEL_TIME,
     Team,
     analyze_schedule,
     available_teams,
     default_game_duration,
     default_stoppage_buffer,
+    find_relevant_travel_legs,
     games_for_team,
     load_schedule,
+    travel_leg_key,
 )
 from duration_store import DurationStore
 from pair_store import PairStore, StoredPair
 from priorities import PRIORITY_LEVELS, normalize_priority
+from travel_times import GoogleRoutesClient, GoogleRoutesError
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -32,6 +36,10 @@ DEFAULT_CSV = APP_DIR / "Regionsspielplan_Bayern_2026-27.csv"
 DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
 SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
+MAX_RELEVANT_TRAVEL_GAP_MINUTES = 480
+DEFAULT_TRAVEL_SAFETY_PERCENT = 15
+DEFAULT_TRAVEL_TRANSFER_BUFFER_MINUTES = 10
+DEFAULT_MAX_GOOGLE_REQUESTS_PER_RUN = 100
 DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
@@ -39,8 +47,8 @@ BRAND_FONT_DEMI = APP_DIR / "static" / "eras-demi.ttf"
 BRAND_FONT_BOLD = APP_DIR / "static" / "eras-bold.ttf"
 ANALYSIS_HELP = (
     "Prüft den gesamten Spielplan auf Überschneidungen der festgelegten "
-    "Mannschaftspaare und auf fehlenden Puffer zwischen Heimspielen. Die "
-    "Ergebnisse werden nach Priorität sortiert."
+    "Mannschaftspaare, zu knappe Fahrzeiten und fehlenden Puffer zwischen "
+    "Heimspielen. Die Ergebnisse werden nach Priorität sortiert."
 )
 DURATION_HELP = (
     "Lege je Mannschaft die Regeldauer einschließlich Halbzeit und einen "
@@ -50,6 +58,13 @@ DURATION_HELP = (
 PAIR_HELP = (
     "Lege Mannschaftspaare fest, deren Belegungszeiten sich nicht überschneiden "
     "dürfen, und weise jedem Paar eine Priorität zu."
+)
+TRAVEL_HELP = (
+    "Zeigt ausschließlich die gerichteten Hallenverbindungen, die für definierte "
+    "Mannschaftspaare am selben Spieltag relevant sind. Google Maps wird erst "
+    "beim Start einer Spielplanprüfung abgefragt. Die Planungszeit besteht aus "
+    "der pessimistischen Google-Fahrzeit, einem Sicherheitszuschlag und einem "
+    "Puffer für Parkplatz und Hallenweg."
 )
 
 
@@ -63,6 +78,13 @@ def configured_value(name: str, default: str = "") -> str:
     except FileNotFoundError:
         return default
     return str(secret_value) if secret_value else default
+
+
+def configured_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return min(max(int(configured_value(name, str(default))), minimum), maximum)
+    except ValueError:
+        return default
 
 
 def oidc_auth_is_configured() -> bool:
@@ -380,6 +402,17 @@ def create_duration_store(connection_string: str, table_name: str) -> DurationSt
     return DurationStore.from_connection_string(connection_string, table_name)
 
 
+@st.cache_resource(show_spinner=False)
+def create_google_routes_client(
+    api_key: str, safety_percent: int, transfer_buffer_minutes: int
+) -> GoogleRoutesClient:
+    return GoogleRoutesClient(
+        api_key,
+        safety_percent=safety_percent,
+        transfer_buffer_minutes=transfer_buffer_minutes,
+    )
+
+
 def initialize_duration_settings() -> dict[str, dict[str, int]]:
     settings = st.session_state.setdefault("duration_settings", {})
     for team in teams:
@@ -472,6 +505,103 @@ def pairs_for_analysis(
     return result, skipped
 
 
+def relevant_travel_legs(
+    analysis_pairs: list[tuple[Team, Team, str]],
+) -> pd.DataFrame:
+    return find_relevant_travel_legs(
+        schedule,
+        analysis_pairs,
+        current_duration_map(),
+        PRE_GAME_BUFFER_MINUTES,
+        MAX_RELEVANT_TRAVEL_GAP_MINUTES,
+    )
+
+
+def resolve_travel_times(
+    legs: pd.DataFrame,
+) -> tuple[dict[tuple[str, str, str], int], dict[str, int]]:
+    estimates: dict[tuple[str, str, str], int] = {}
+    stats = {
+        "relevant": len(legs),
+        "requested": 0,
+        "resolved": 0,
+        "missing_address": 0,
+        "failed": 0,
+        "deferred": 0,
+    }
+    if legs.empty:
+        return estimates, stats
+
+    unique_legs = legs.drop_duplicates(
+        subset=["Startschlüssel", "Zielschlüssel", "Abfahrt"]
+    ).sort_values(["Verfügbar (Min.)", "Abfahrt"])
+    missing_address = unique_legs[
+        unique_legs["Startadresse"].astype(str).str.strip().eq("")
+        | unique_legs["Zieladresse"].astype(str).str.strip().eq("")
+    ]
+    stats["missing_address"] = len(missing_address)
+    requestable = unique_legs.drop(index=missing_address.index)
+    request_batch = requestable.head(max_google_requests_per_run)
+    stats["deferred"] = max(0, len(requestable) - len(request_batch))
+
+    if google_routes_client is None:
+        stats["deferred"] += len(request_batch)
+        return estimates, stats
+
+    for _, leg in request_batch.iterrows():
+        stats["requested"] += 1
+        try:
+            estimate = google_routes_client.compute_route(
+                str(leg["Startadresse"]),
+                str(leg["Zieladresse"]),
+                pd.Timestamp(leg["Abfahrt"]).to_pydatetime(),
+            )
+        except (GoogleRoutesError, ValueError):
+            stats["failed"] += 1
+            continue
+        estimates[
+            travel_leg_key(
+                leg["Startschlüssel"], leg["Zielschlüssel"], leg["Abfahrt"]
+            )
+        ] = estimate.planning_minutes
+        stats["resolved"] += 1
+    return estimates, stats
+
+
+def show_travel_status(stats: dict[str, int]) -> None:
+    if stats["missing_address"]:
+        st.warning(
+            f"{stats['missing_address']} relevante Verbindung(en) konnten nicht "
+            "abgefragt werden, weil im Spielplan eine Hallenadresse fehlt."
+        )
+    if stats["failed"]:
+        st.warning(
+            f"Google Maps konnte {stats['failed']} Fahrzeit(en) nicht liefern. "
+            "Diese Verbindungen wurden in diesem Prüflauf nicht bewertet."
+        )
+    if stats["deferred"]:
+        if google_routes_client is None:
+            st.warning(
+                "Die Fahrzeitprüfung ist vorbereitet, aber der serverseitige "
+                "Google-Maps-API-Schlüssel ist noch nicht konfiguriert."
+            )
+        else:
+            st.warning(
+                f"{stats['deferred']} Verbindung(en) wurden wegen des Limits von "
+                f"{max_google_requests_per_run} Google-Aufrufen pro Prüflauf nicht "
+                "bewertet."
+            )
+
+
+def show_google_attribution() -> None:
+    st.markdown(
+        '<p style="font-family:Arial,sans-serif;font-size:14px;'
+        'font-weight:400;color:#5f6368;margin-top:.35rem">'
+        "Fahrzeitdaten: Google Maps</p>",
+        unsafe_allow_html=True,
+    )
+
+
 def show_analysis_page() -> None:
     st.header("Spielplanprüfung", help=ANALYSIS_HELP)
 
@@ -493,13 +623,18 @@ def show_analysis_page() -> None:
         )
 
     if st.button("Gesamten Spielplan prüfen", type="primary", width="stretch"):
-        findings = analyze_schedule(
-            schedule,
-            teams,
-            current_duration_map(),
-            analysis_pairs,
-            PRE_GAME_BUFFER_MINUTES,
-        )
+        legs = relevant_travel_legs(analysis_pairs)
+        with st.spinner("Relevante Fahrzeiten werden geprüft …"):
+            travel_minutes, travel_stats = resolve_travel_times(legs)
+            findings = analyze_schedule(
+                schedule,
+                teams,
+                current_duration_map(),
+                analysis_pairs,
+                PRE_GAME_BUFFER_MINUTES,
+                travel_minutes,
+            )
+        show_travel_status(travel_stats)
         if findings.empty:
             st.success("Die aktiven Regeln haben keine Auffälligkeiten gefunden.")
         else:
@@ -518,12 +653,21 @@ def show_analysis_page() -> None:
                     "Kommentar": st.column_config.TextColumn(width="large"),
                 },
             )
-            st.download_button(
-                "Kommentierte Prüfung als CSV herunterladen",
-                findings.to_csv(index=False, sep=";").encode("utf-8-sig"),
-                "spielplan_pruefung.csv",
-                "text/csv",
-            )
+            downloadable = findings.loc[findings["Regel"].ne(RULE_TRAVEL_TIME)]
+            if not downloadable.empty:
+                st.download_button(
+                    "Prüfung ohne Live-Fahrzeitdaten als CSV herunterladen",
+                    downloadable.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                    "spielplan_pruefung.csv",
+                    "text/csv",
+                )
+            if len(downloadable) != len(findings):
+                st.caption(
+                    "Fahrzeitbefunde werden wegen der Nutzungsbedingungen der "
+                    "Google Routes API nur in dieser Ansicht dargestellt."
+                )
+        if travel_stats["resolved"]:
+            show_google_attribution()
 
     with st.expander("Enthaltene Mannschaften"):
         st.dataframe(
@@ -748,6 +892,59 @@ def show_pair_page() -> None:
                             st.rerun()
 
 
+def show_travel_page() -> None:
+    st.header("Fahrzeiten", help=TRAVEL_HELP)
+
+    _, saved_pairs, pair_error = load_saved_pairs()
+    if pair_error:
+        st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
+    analysis_pairs, _ = pairs_for_analysis(saved_pairs)
+    legs = relevant_travel_legs(analysis_pairs)
+
+    if legs.empty:
+        st.info("Für die aktuellen Mannschaftspaare ist keine Fahrstrecke relevant.")
+    else:
+        matrix = (
+            legs.groupby(
+                ["Startschlüssel", "Starthalle", "Zielschlüssel", "Zielhalle"],
+                as_index=False,
+            )
+            .agg(
+                **{
+                    "Betroffene Spielabfolgen": ("Datum", "count"),
+                    "Knappster Zeitrahmen (Min.)": ("Verfügbar (Min.)", "min"),
+                }
+            )
+            .rename(columns={"Starthalle": "Von", "Zielhalle": "Nach"})
+        )
+        st.dataframe(
+            matrix[
+                [
+                    "Von",
+                    "Nach",
+                    "Betroffene Spielabfolgen",
+                    "Knappster Zeitrahmen (Min.)",
+                ]
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            f"{len(legs)} relevante Spielabfolge(n), gebündelt zu "
+            f"{len(matrix)} gerichteten Hallenverbindung(en)."
+        )
+
+    if google_routes_client is None:
+        st.warning(
+            "Google Maps ist noch nicht konfiguriert. Bis der API-Schlüssel im "
+            "Azure App Service hinterlegt ist, werden Fahrzeiten nicht bewertet."
+        )
+    else:
+        st.success(
+            "Google Maps ist konfiguriert. Die Fahrzeiten werden ausschließlich "
+            "beim Start der Spielplanprüfung live abgefragt."
+        )
+
 def show_guide_page() -> None:
     st.header("Anleitung")
     st.markdown(
@@ -774,7 +971,17 @@ def show_guide_page() -> None:
         f"{PRE_GAME_BUFFER_MINUTES} Minuten Vorlauf eingeplant."
     )
 
-    st.subheader("3. Gesamten Spielplan prüfen")
+    st.subheader("3. Fahrzeiten berücksichtigen")
+    st.markdown(
+        "Für Mannschaftspaare mit zwei nicht überlappenden Spielen am selben Tag "
+        "ermittelt die App nur die tatsächlich benötigten Fahrstrecken. Beim "
+        "Prüflauf wird die pessimistische Fahrzeit live über Google Maps ermittelt. "
+        f"Hinzu kommen {travel_safety_percent} % Sicherheitszuschlag und "
+        f"{travel_transfer_buffer_minutes} Minuten für Parkplatz und Hallenweg. "
+        "Google-Fahrtdauern werden nicht dauerhaft gespeichert."
+    )
+
+    st.subheader("4. Gesamten Spielplan prüfen")
     st.markdown(
         "Die Prüfung wendet alle aktiven Regeln auf den vollständigen Spielplan an "
         "und gibt jeden Sachverhalt genau einmal aus. Die Ergebnistabelle ist nach "
@@ -787,6 +994,11 @@ def show_guide_page() -> None:
                     "Priorität": "Je Mannschaftspaar",
                     "Regel": RULE_TEAM_OVERLAP,
                     "Prüfumfang": "Alle definierten Mannschaftspaare",
+                },
+                {
+                    "Priorität": "Je Mannschaftspaar",
+                    "Regel": RULE_TRAVEL_TIME,
+                    "Prüfumfang": "Relevante Abfolgen an verschiedenen Hallen",
                 },
                 {
                     "Priorität": RULE_PRIORITIES[RULE_HOME_BUFFER],
@@ -834,6 +1046,12 @@ page = st.navigation(
             url_path="mannschaftspaare",
         ),
         st.Page(
+            show_travel_page,
+            title="Fahrzeiten",
+            icon=":material/route:",
+            url_path="fahrzeiten",
+        ),
+        st.Page(
             show_guide_page,
             title="Anleitung",
             icon=":material/help:",
@@ -879,6 +1097,34 @@ connection_string = configured_value("AZURE_STORAGE_CONNECTION_STRING")
 duration_store = None
 stored_durations = {}
 duration_storage_error = ""
+travel_safety_percent = configured_int(
+    "TRAVEL_TIME_SAFETY_PERCENT",
+    DEFAULT_TRAVEL_SAFETY_PERCENT,
+    0,
+    100,
+)
+travel_transfer_buffer_minutes = configured_int(
+    "TRAVEL_TIME_TRANSFER_BUFFER_MINUTES",
+    DEFAULT_TRAVEL_TRANSFER_BUFFER_MINUTES,
+    0,
+    120,
+)
+max_google_requests_per_run = configured_int(
+    "GOOGLE_ROUTES_MAX_REQUESTS_PER_RUN",
+    DEFAULT_MAX_GOOGLE_REQUESTS_PER_RUN,
+    1,
+    1000,
+)
+google_api_key = configured_value("GOOGLE_MAPS_API_KEY")
+google_routes_client = (
+    create_google_routes_client(
+        google_api_key,
+        travel_safety_percent,
+        travel_transfer_buffer_minutes,
+    )
+    if google_api_key
+    else None
+)
 
 if connection_string:
     try:
