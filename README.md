@@ -23,13 +23,13 @@ Die Navigation teilt die App in fünf Seiten auf:
   Hallenverbindungen.
 - **Anleitung** bündelt die Erläuterungen zur Bedienung und zu den Prüfregeln.
 
-Aktuell sind drei Regeln aktiv: Für Überschneidungen definierter
+Aktuell sind vier Regeln aktiv: Für Überschneidungen definierter
 Mannschaftspaare wird die Priorität je Paar als **hoch**, **mittel** oder
 **niedrig** festgelegt. Dieselbe Priorität gilt für eine zu knappe Fahrzeit
 zwischen zwei Spielen dieses Paars. Ein fehlender Puffer zwischen Heimspielen
-hat die Priorität **mittel**. Die spätere Kontrolle der Hallenbuchungen ist noch
-nicht aktiv. Pro Auffälligkeit wird genau eine Zeile mit Datum, betroffenen
-Spielen, Halle und einer konkreten Erläuterung ausgegeben. Doppelte und
+hat die Priorität **mittel**. Unvollständige OMOC-Buchungen für Jahnhalle und
+Hardtschule haben die Priorität **hoch**. Pro Auffälligkeit wird genau eine Zeile
+mit Datum, betroffenen Spielen, Halle und einer konkreten Erläuterung ausgegeben. Doppelte und
 umgekehrt eingetragene Mannschaftspaare erzeugen keine redundanten Ergebnisse.
 
 Ein Zeitraumsfilter ist nicht erforderlich; die Prüfungen beziehen sich immer
@@ -60,10 +60,10 @@ Team-Time-outs vorgesehen sind, beträgt der Unterbrechungspuffer zunächst 3
 Minuten. Diese Werte sind in der App je Mannschaft änderbar.
 
 Die Heimspielprüfung vergleicht die Belegungsblöcke der enthaltenen
-Mannschaften je Halle und meldet zu knappe Abfolgen. Der spätere Abgleich mit
-tatsächlich gebuchten Hallenzeiten ist noch nicht enthalten.
+Mannschaften je Halle, meldet zu knappe Abfolgen und gleicht Jahnhalle sowie
+Hardtschule mit den tatsächlich in OMOC gebuchten Zeiten ab.
 
-## Fahrzeitprüfung mit Google Maps
+## Fahrzeitprüfung mit Azure Maps
 
 Die Fahrzeitprüfung erzeugt bewusst keine vollständige Matrix aller bayerischen
 Hallen. Eine Verbindung wird nur dann live abgefragt, wenn
@@ -74,52 +74,88 @@ Hallen. Eine Verbindung wird nur dann live abgefragt, wenn
 4. die Spiele in unterschiedlichen Hallen stattfinden und
 5. zwischen beiden Fenstern höchstens acht Stunden liegen.
 
-Die Richtung folgt der tatsächlichen Spielabfolge. Mehrfach identische
-Verbindungen zur gleichen Abfahrtszeit werden innerhalb eines Prüflaufs nur
-einmal abgefragt. Die Routes API wird mit `TRAFFIC_AWARE_OPTIMAL` und dem
-Verkehrsmodell `PESSIMISTIC` aufgerufen. Für die Planungszeit addiert die App
-standardmäßig 15 Prozent Sicherheitszuschlag und 10 Minuten für Parkplatz und
-Weg in die Halle und rundet anschließend auf fünf Minuten auf.
+Die Richtung folgt der tatsächlichen Spielabfolge. Azure Maps geocodiert die
+beiden Hallenadressen und berechnet die schnellste Route unter Berücksichtigung
+des Verkehrs. Für die Planungszeit addiert die App standardmäßig 15 Prozent
+Sicherheitszuschlag und 10 Minuten für Parkplatz und Weg in die Halle und rundet
+anschließend auf fünf Minuten auf.
 
-Google-Fahrtdauern und Entfernungen werden nicht dauerhaft in Azure gespeichert.
-Das ist für ein EWR-Abrechnungskonto wichtig: Die aktuellen
-[Google Maps Platform EEA Service Specific Terms](https://cloud.google.com/terms/maps-platform/eea/maps-service-terms)
-erlauben bei der Routes API nur das zeitweise Speichern von Breiten- und
-Längengraden, nicht von Fahrtdauern. Die relevante Hallenmatrix wird deshalb bei
-jeder Prüfung aus dem eigenen nuLiga-Spielplan neu gebildet und live bewertet.
-Die Darstellung nennt Google Maps unmittelbar als Datenquelle, wie in den
-[Routes-Attributionsregeln](https://developers.google.com/maps/documentation/routes/policies)
-vorgesehen.
+Eine ermittelte Fahrtdauer wird gerichtet und abhängig von Wochentag und
+Abfahrtszeit in Azure Table Storage gespeichert. Die Gültigkeit entspricht dem
+von Azure zurückgegebenen Cache-Zeitraum, höchstens jedoch sechs Monaten. Nach
+Ablauf wird nur dieser benötigte Eintrag aktualisiert. Dadurch wächst die Matrix
+ausschließlich mit tatsächlich relevanten Spielabfolgen.
 
 ### Kosten und Schutz vor unerwarteten Ausgaben
 
-Das pessimistische Verkehrsmodell benötigt Compute Routes Pro. Nach der
-[aktuellen Google-Preisliste](https://developers.google.com/maps/billing-and-pricing/pricing)
-sind monatlich 5.000 Pro-Aufrufe kostenlos; anschließend beginnt die erste
-Preisstufe bei 10 US-Dollar je 1.000 Aufrufe. Bei ungefähr zehn Nutzern und nur
-wenigen Prüfläufen ist daher mit 0 US-Dollar API-Kosten zu rechnen. Trotzdem
-sollten im Google-Cloud-Projekt ein Budgetalarm und eine Tagesquote von zum
-Beispiel 100 Requests gesetzt werden. Die App begrenzt einen Prüflauf zusätzlich
-standardmäßig auf 100 Aufrufe.
+Azure Maps Gen2 enthält monatlich 1.000 kostenlose Routing-Transaktionen. Bei
+ungefähr zehn Nutzern, dem bedarfsgesteuerten Cache und maximal 100 neuen
+Routen je Prüflauf ist daher mit keinen zusätzlichen API-Kosten zu rechnen. Eine
+eigene Ressourcengruppe für Azure Maps erhält trotzdem ein Monatsbudget mit
+Warnungen, damit andere App-Service-Kosten den Alarm nicht verfälschen.
 
-### Einmalige Google-Konfiguration
+### Einmalige Azure-Maps-Konfiguration
 
-1. In einem Google-Cloud-Projekt die Abrechnung aktivieren und die
-   [Routes API einschalten](https://developers.google.com/maps/documentation/routes/get-api-key).
-2. Einen API-Schlüssel anlegen und als API-Einschränkung ausschließlich
-   **Routes API** zulassen.
-3. Als Anwendungseinschränkung nach Möglichkeit die möglichen ausgehenden
-   IP-Adressen des Azure App Service hinterlegen. Diese zeigt Azure CLI mit
-   `az webapp show --resource-group rg-spielplaner --name spielplaner-handamball-azure --query possibleOutboundIpAddresses --output tsv`.
-4. Den Schlüssel direkt als Azure App Setting speichern, niemals in den Chat,
-   das Repository oder eine lokale `secrets.toml` einchecken:
+Azure Maps wird in der Ressourcengruppe `rg-spielplaner-maps` als Gen2-Konto
+angelegt. Der Schlüssel wird direkt als App Setting gespeichert und weder im
+Repository noch in einer lokalen `secrets.toml` eingecheckt:
 
-   ```bash
-   az webapp config appsettings set \
-     --resource-group rg-spielplaner \
-     --name spielplaner-handamball-azure \
-     --settings GOOGLE_MAPS_API_KEY="HIER_DIREKT_DEN_SCHLUESSEL_EINSETZEN"
-   ```
+```bash
+az group create --name rg-spielplaner-maps --location westeurope
+az maps account create --name maps-spielplaner-wm2026 \
+  --resource-group rg-spielplaner-maps --kind Gen2 --sku G2 \
+  --accept-tos --disable-local-auth false
+MAPS_KEY=$(az maps account keys list --name maps-spielplaner-wm2026 \
+  --resource-group rg-spielplaner-maps --query primaryKey --output tsv)
+az webapp config appsettings set --resource-group rg-spielplaner \
+  --name spielplaner-handamball-azure \
+  --settings AZURE_MAPS_SUBSCRIPTION_KEY="$MAPS_KEY" \
+    AZURE_TRAVEL_TIME_TABLE_NAME="traveltimes"
+unset MAPS_KEY
+```
+
+Für die separate Maps-Ressourcengruppe wird ein Monatsbudget von 1 Euro mit
+Warnungen bei 50 und 100 Prozent angelegt:
+
+```bash
+BUDGET_EMAIL="sylvester.wolf@handamball.de"
+BUDGET_START="$(date -u +%Y-%m-01)"
+BUDGET_END="$(date -u -d '+10 years' +%Y-%m-01)"
+NOTIFICATIONS=$(printf '{"Half":{"enabled":true,"operator":"GreaterThanOrEqualTo","threshold":50,"contact-emails":["%s"]},"Full":{"enabled":true,"operator":"GreaterThanOrEqualTo","threshold":100,"contact-emails":["%s"]}}' "$BUDGET_EMAIL" "$BUDGET_EMAIL")
+az consumption budget create-with-rg \
+  --resource-group rg-spielplaner-maps \
+  --budget-name budget-maps-spielplaner \
+  --amount 1 --category Cost --time-grain Monthly \
+  --time-period "{\"start-date\":\"$BUDGET_START\",\"end-date\":\"$BUDGET_END\"}" \
+  --notifications "$NOTIFICATIONS"
+```
+
+Budgetwarnungen informieren nur; sie stoppen Azure Maps nicht automatisch.
+
+## Hallenbuchungsprüfung mit OMOC
+
+Die Hallenbuchungsregel verarbeitet ausschließlich Buchungen mit
+`name_firma = Handball` und ausschließlich diese Ressourcen:
+
+- Jahnhalle: Halle Süd, Mitte und Nord sowie der Verkaufsraum als
+  Bewirtungsraum.
+- Hardtschule: Halle Ost, Mitte und West sowie die Küche als Bewirtungsraum.
+
+Für jedes Heimspiel muss jeder der vier Räume das vollständige Fenster vom
+30-Minuten-Vorlauf bis zum berechneten Spielende abdecken. Mehrere unmittelbar
+aneinander anschließende Buchungen dürfen das Fenster gemeinsam abdecken. Eine
+fehlende oder zeitlich zu kurze Buchung erzeugt genau einen Befund pro Spiel.
+Andere Sportstätten, Kostensätze, Namen und Veranstaltungstitel werden verworfen.
+
+OMOC-Zugangsdaten werden ausschließlich als Azure App Settings gespeichert:
+
+```bash
+az webapp config appsettings set --resource-group rg-spielplaner \
+  --name spielplaner-handamball-azure \
+  --settings OMOC_BOOKINGS_URL="HIER_OMOC_BUCHUNGS_URL" \
+    OMOC_API_USERNAME="HIER_OMOC_BENUTZER" \
+    OMOC_API_PASSWORD="HIER_NEUES_OMOC_KENNWORT"
+```
 
 Regelgrundlagen für die Startwerte:
 
@@ -152,14 +188,18 @@ Umgebungsvariablen:
   ist `teamdurations`
 - `AZURE_SCHEDULE_CONTAINER_NAME`: optionaler Blob-Container für versionierte
   Spielplan-Uploads, Standard ist `schedules`
+- `AZURE_TRAVEL_TIME_TABLE_NAME`: optionaler Tabellenname für den Fahrzeitcache,
+  Standard ist `traveltimes`
 - `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden
   dürfen
-- `GOOGLE_MAPS_API_KEY`: serverseitiger, auf die Routes API eingeschränkter
-  Google-Maps-API-Schlüssel
+- `AZURE_MAPS_SUBSCRIPTION_KEY`: serverseitiger Azure-Maps-Schlüssel
 - `TRAVEL_TIME_SAFETY_PERCENT`: optionaler Sicherheitszuschlag, Standard `15`
 - `TRAVEL_TIME_TRANSFER_BUFFER_MINUTES`: optionaler Parkplatz-/Hallenpuffer,
   Standard `10`
-- `GOOGLE_ROUTES_MAX_REQUESTS_PER_RUN`: Schutzlimit je Prüflauf, Standard `100`
+- `AZURE_MAPS_MAX_REQUESTS_PER_RUN`: Schutzlimit für neue Azure-Maps-Abfragen je
+  Prüflauf, Standard `100`
+- `OMOC_BOOKINGS_URL`, `OMOC_API_USERNAME`, `OMOC_API_PASSWORD`: serverseitige
+  Zugangsdaten der OMOC-Buchungsabfrage
 
 ## Azure App Service
 

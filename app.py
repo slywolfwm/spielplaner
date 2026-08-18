@@ -15,7 +15,9 @@ from access_control import (
     parse_oidc_user,
 )
 from analysis import (
+    HALL_BOOKING_REQUIREMENTS,
     RULE_HOME_BUFFER,
+    RULE_HALL_BOOKING,
     RULE_PRIORITIES,
     RULE_TEAM_OVERLAP,
     RULE_TRAVEL_TIME,
@@ -26,14 +28,17 @@ from analysis import (
     default_stoppage_buffer,
     find_relevant_travel_legs,
     games_for_team,
+    home_game_blocks,
     load_schedule,
     travel_leg_key,
 )
 from duration_store import DurationStore
+from omoc import OmocClient, OmocError
 from pair_store import PairStore, StoredPair, pair_row_key
 from priorities import PRIORITY_LEVELS, normalize_priority
 from schedule_store import ScheduleStore, StoredSchedule
-from travel_times import GoogleRoutesClient, GoogleRoutesError
+from travel_time_store import TravelTimeStore
+from travel_times import AzureMapsClient, AzureMapsError
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -44,7 +49,7 @@ PRE_GAME_BUFFER_MINUTES = 30
 MAX_RELEVANT_TRAVEL_GAP_MINUTES = 480
 DEFAULT_TRAVEL_SAFETY_PERCENT = 15
 DEFAULT_TRAVEL_TRANSFER_BUFFER_MINUTES = 10
-DEFAULT_MAX_GOOGLE_REQUESTS_PER_RUN = 100
+DEFAULT_MAX_AZURE_MAPS_REQUESTS_PER_RUN = 100
 DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
@@ -67,9 +72,9 @@ PAIR_HELP = (
 )
 TRAVEL_HELP = (
     "Zeigt ausschließlich die gerichteten Hallenverbindungen, die für definierte "
-    "Mannschaftspaare am selben Spieltag relevant sind. Google Maps wird erst "
-    "beim Start einer Spielplanprüfung abgefragt. Die Planungszeit besteht aus "
-    "der pessimistischen Google-Fahrzeit, einem Sicherheitszuschlag und einem "
+    "Mannschaftspaare am selben Spieltag relevant sind. Azure Maps wird nur bei "
+    "einem fehlenden oder abgelaufenen Cache-Eintrag aufgerufen. Die Planungszeit "
+    "besteht aus der Verkehrsfahrtzeit, einem Sicherheitszuschlag und einem "
     "Puffer für Parkplatz und Hallenweg."
 )
 
@@ -416,14 +421,28 @@ def create_schedule_store(
 
 
 @st.cache_resource(show_spinner=False)
-def create_google_routes_client(
-    api_key: str, safety_percent: int, transfer_buffer_minutes: int
-) -> GoogleRoutesClient:
-    return GoogleRoutesClient(
-        api_key,
+def create_azure_maps_client(
+    subscription_key: str, safety_percent: int, transfer_buffer_minutes: int
+) -> AzureMapsClient:
+    return AzureMapsClient(
+        subscription_key,
         safety_percent=safety_percent,
         transfer_buffer_minutes=transfer_buffer_minutes,
     )
+
+
+@st.cache_resource(show_spinner=False)
+def create_travel_time_store(
+    connection_string: str, table_name: str
+) -> TravelTimeStore:
+    return TravelTimeStore.from_connection_string(connection_string, table_name)
+
+
+@st.cache_resource(show_spinner=False)
+def create_omoc_client(
+    bookings_url: str, username: str, password: str
+) -> OmocClient:
+    return OmocClient(bookings_url, username, password)
 
 
 def initialize_duration_settings() -> dict[str, dict[str, int]]:
@@ -540,9 +559,11 @@ def resolve_travel_times(
         "relevant": len(legs),
         "requested": 0,
         "resolved": 0,
+        "cached": 0,
         "missing_address": 0,
         "failed": 0,
         "deferred": 0,
+        "cache_failed": 0,
     }
     if legs.empty:
         return estimates, stats
@@ -556,22 +577,42 @@ def resolve_travel_times(
     ]
     stats["missing_address"] = len(missing_address)
     requestable = unique_legs.drop(index=missing_address.index)
-    request_batch = requestable.head(max_google_requests_per_run)
-    stats["deferred"] = max(0, len(requestable) - len(request_batch))
+    unresolved = []
+    for _, leg in requestable.iterrows():
+        cached = None
+        if travel_time_store is not None:
+            try:
+                cached = travel_time_store.get(
+                    leg["Startschlüssel"], leg["Zielschlüssel"], leg["Abfahrt"]
+                )
+            except Exception:
+                stats["cache_failed"] += 1
+        if cached is None:
+            unresolved.append(leg)
+            continue
+        estimates[
+            travel_leg_key(
+                leg["Startschlüssel"], leg["Zielschlüssel"], leg["Abfahrt"]
+            )
+        ] = cached.planning_minutes
+        stats["cached"] += 1
+        stats["resolved"] += 1
 
-    if google_routes_client is None:
+    request_batch = unresolved[:max_azure_maps_requests_per_run]
+    stats["deferred"] = max(0, len(unresolved) - len(request_batch))
+    if azure_maps_client is None:
         stats["deferred"] += len(request_batch)
         return estimates, stats
 
-    for _, leg in request_batch.iterrows():
+    for leg in request_batch:
         stats["requested"] += 1
         try:
-            estimate = google_routes_client.compute_route(
+            estimate = azure_maps_client.compute_route(
                 str(leg["Startadresse"]),
                 str(leg["Zieladresse"]),
                 pd.Timestamp(leg["Abfahrt"]).to_pydatetime(),
             )
-        except (GoogleRoutesError, ValueError):
+        except (AzureMapsError, ValueError):
             stats["failed"] += 1
             continue
         estimates[
@@ -579,6 +620,19 @@ def resolve_travel_times(
                 leg["Startschlüssel"], leg["Zielschlüssel"], leg["Abfahrt"]
             )
         ] = estimate.planning_minutes
+        if travel_time_store is not None:
+            try:
+                travel_time_store.save(
+                    leg["Startschlüssel"],
+                    leg["Zielschlüssel"],
+                    leg["Abfahrt"],
+                    estimate.source_minutes,
+                    estimate.planning_minutes,
+                    estimate.distance_meters,
+                    estimate.valid_until,
+                )
+            except Exception:
+                stats["cache_failed"] += 1
         stats["resolved"] += 1
     return estimates, stats
 
@@ -591,30 +645,63 @@ def show_travel_status(stats: dict[str, int]) -> None:
         )
     if stats["failed"]:
         st.warning(
-            f"Google Maps konnte {stats['failed']} Fahrzeit(en) nicht liefern. "
+            f"Azure Maps konnte {stats['failed']} Fahrzeit(en) nicht liefern. "
             "Diese Verbindungen wurden in diesem Prüflauf nicht bewertet."
         )
+    if stats["cache_failed"]:
+        st.warning(
+            "Der persistente Fahrzeitcache war teilweise nicht erreichbar. "
+            "Ermittelte Fahrzeiten wurden trotzdem für diesen Prüflauf verwendet."
+        )
     if stats["deferred"]:
-        if google_routes_client is None:
+        if azure_maps_client is None:
             st.warning(
                 "Die Fahrzeitprüfung ist vorbereitet, aber der serverseitige "
-                "Google-Maps-API-Schlüssel ist noch nicht konfiguriert."
+                "Azure-Maps-Schlüssel ist noch nicht konfiguriert."
             )
         else:
             st.warning(
                 f"{stats['deferred']} Verbindung(en) wurden wegen des Limits von "
-                f"{max_google_requests_per_run} Google-Aufrufen pro Prüflauf nicht "
+                f"{max_azure_maps_requests_per_run} Azure-Maps-Aufrufen pro "
+                "Prüflauf nicht "
                 "bewertet."
             )
+    if stats["cached"]:
+        st.caption(
+            f"{stats['cached']} Fahrzeit(en) wurden aus dem persistenten "
+            "Azure-Cache verwendet."
+        )
 
 
-def show_google_attribution() -> None:
+def show_azure_maps_attribution() -> None:
     st.markdown(
         '<p style="font-family:Arial,sans-serif;font-size:14px;'
         'font-weight:400;color:#5f6368;margin-top:.35rem">'
-        "Fahrzeitdaten: Google Maps</p>",
+        "Fahrzeitdaten: Azure Maps</p>",
         unsafe_allow_html=True,
     )
+
+
+def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
+    if omoc_client is None:
+        return None, "OMOC ist noch nicht konfiguriert."
+    blocks = home_game_blocks(
+        schedule, teams, current_duration_map(), PRE_GAME_BUFFER_MINUTES
+    )
+    relevant = blocks[
+        blocks["Hallennummer"].astype(str).isin(HALL_BOOKING_REQUIREMENTS)
+    ]
+    if relevant.empty:
+        return pd.DataFrame(), ""
+    try:
+        return (
+            omoc_client.fetch_bookings(
+                relevant["Datum"].min(), relevant["Datum"].max()
+            ),
+            "",
+        )
+    except (OmocError, ValueError) as exc:
+        return None, str(exc)
 
 
 def show_analysis_page() -> None:
@@ -639,8 +726,9 @@ def show_analysis_page() -> None:
 
     if st.button("Gesamten Spielplan prüfen", type="primary", width="stretch"):
         legs = relevant_travel_legs(analysis_pairs)
-        with st.spinner("Relevante Fahrzeiten werden geprüft …"):
+        with st.spinner("Fahrzeiten und Hallenbuchungen werden geprüft …"):
             travel_minutes, travel_stats = resolve_travel_times(legs)
+            hall_bookings, hall_booking_error = resolve_hall_bookings()
             findings = analyze_schedule(
                 schedule,
                 teams,
@@ -648,8 +736,14 @@ def show_analysis_page() -> None:
                 analysis_pairs,
                 PRE_GAME_BUFFER_MINUTES,
                 travel_minutes,
+                hall_bookings,
             )
         show_travel_status(travel_stats)
+        if hall_booking_error:
+            st.warning(
+                f"Die Hallenbuchungsregel wurde nicht ausgewertet: "
+                f"{hall_booking_error}"
+            )
         if findings.empty:
             st.success("Die aktiven Regeln haben keine Auffälligkeiten gefunden.")
         else:
@@ -668,21 +762,14 @@ def show_analysis_page() -> None:
                     "Kommentar": st.column_config.TextColumn(width="large"),
                 },
             )
-            downloadable = findings.loc[findings["Regel"].ne(RULE_TRAVEL_TIME)]
-            if not downloadable.empty:
-                st.download_button(
-                    "Prüfung ohne Live-Fahrzeitdaten als CSV herunterladen",
-                    downloadable.to_csv(index=False, sep=";").encode("utf-8-sig"),
-                    "spielplan_pruefung.csv",
-                    "text/csv",
-                )
-            if len(downloadable) != len(findings):
-                st.caption(
-                    "Fahrzeitbefunde werden wegen der Nutzungsbedingungen der "
-                    "Google Routes API nur in dieser Ansicht dargestellt."
-                )
+            st.download_button(
+                "Prüfung als CSV herunterladen",
+                findings.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                "spielplan_pruefung.csv",
+                "text/csv",
+            )
         if travel_stats["resolved"]:
-            show_google_attribution()
+            show_azure_maps_attribution()
 
     with st.expander("Enthaltene Mannschaften"):
         st.dataframe(
@@ -942,15 +1029,15 @@ def show_travel_page() -> None:
             f"{len(matrix)} gerichteten Hallenverbindung(en)."
         )
 
-    if google_routes_client is None:
+    if azure_maps_client is None:
         st.warning(
-            "Google Maps ist noch nicht konfiguriert. Bis der API-Schlüssel im "
+            "Azure Maps ist noch nicht konfiguriert. Bis der Schlüssel im "
             "Azure App Service hinterlegt ist, werden Fahrzeiten nicht bewertet."
         )
     else:
         st.success(
-            "Google Maps ist konfiguriert. Die Fahrzeiten werden ausschließlich "
-            "beim Start der Spielplanprüfung live abgefragt."
+            "Azure Maps ist konfiguriert. Bereits ermittelte Fahrzeiten werden "
+            "entsprechend ihrer zulässigen Gültigkeit persistent wiederverwendet."
         )
 
 def show_guide_page() -> None:
@@ -984,13 +1071,23 @@ def show_guide_page() -> None:
     st.markdown(
         "Für Mannschaftspaare mit zwei nicht überlappenden Spielen am selben Tag "
         "ermittelt die App nur die tatsächlich benötigten Fahrstrecken. Beim "
-        "Prüflauf wird die pessimistische Fahrzeit live über Google Maps ermittelt. "
+        "Prüflauf wird die Verkehrsfahrtzeit über Azure Maps ermittelt. "
         f"Hinzu kommen {travel_safety_percent} % Sicherheitszuschlag und "
         f"{travel_transfer_buffer_minutes} Minuten für Parkplatz und Hallenweg. "
-        "Google-Fahrtdauern werden nicht dauerhaft gespeichert."
+        "Die Ergebnisse werden höchstens sechs Monate beziehungsweise entsprechend "
+        "einer kürzeren von Azure vorgegebenen Gültigkeit gespeichert."
     )
 
-    st.subheader("4. Gesamten Spielplan prüfen")
+    st.subheader("4. Hallenbuchungen prüfen")
+    st.markdown(
+        "Für Heimspiele in Jahnhalle und Hardtschule gleicht die App das gesamte "
+        "Planungsfenster mit OMOC ab. Erforderlich sind jeweils alle drei "
+        "Hallenteile sowie Verkaufsraum beziehungsweise Küche als Bewirtungsraum. "
+        "Andere Sportstätten, Kostensätze und personenbezogene Buchungsdaten werden "
+        "nicht verarbeitet."
+    )
+
+    st.subheader("5. Gesamten Spielplan prüfen")
     st.markdown(
         "Die Prüfung wendet alle aktiven Regeln auf den vollständigen Spielplan an "
         "und gibt jeden Sachverhalt genau einmal aus. Die Ergebnistabelle ist nach "
@@ -1016,12 +1113,16 @@ def show_guide_page() -> None:
                         f"Alle Heimspiele; {PRE_GAME_BUFFER_MINUTES} Min. Vorlauf"
                     ),
                 },
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING],
+                    "Regel": RULE_HALL_BOOKING,
+                    "Prüfumfang": "Jahnhalle und Hardtschule einschließlich Bewirtungsraum",
+                },
             ]
         ),
         hide_index=True,
         width="stretch",
     )
-    st.caption("Hallenbuchungen werden in einer späteren Ausbaustufe geprüft.")
 
 
 st.set_page_config(page_title="Spielplaner", page_icon=str(BRAND_LOGO), layout="wide")
@@ -1168,20 +1269,38 @@ travel_transfer_buffer_minutes = configured_int(
     0,
     120,
 )
-max_google_requests_per_run = configured_int(
-    "GOOGLE_ROUTES_MAX_REQUESTS_PER_RUN",
-    DEFAULT_MAX_GOOGLE_REQUESTS_PER_RUN,
+max_azure_maps_requests_per_run = configured_int(
+    "AZURE_MAPS_MAX_REQUESTS_PER_RUN",
+    DEFAULT_MAX_AZURE_MAPS_REQUESTS_PER_RUN,
     1,
     1000,
 )
-google_api_key = configured_value("GOOGLE_MAPS_API_KEY")
-google_routes_client = (
-    create_google_routes_client(
-        google_api_key,
+azure_maps_subscription_key = configured_value("AZURE_MAPS_SUBSCRIPTION_KEY")
+azure_maps_client = (
+    create_azure_maps_client(
+        azure_maps_subscription_key,
         travel_safety_percent,
         travel_transfer_buffer_minutes,
     )
-    if google_api_key
+    if azure_maps_subscription_key
+    else None
+)
+travel_time_store = None
+if connection_string:
+    try:
+        travel_time_store = create_travel_time_store(
+            connection_string,
+            configured_value("AZURE_TRAVEL_TIME_TABLE_NAME", "traveltimes"),
+        )
+    except Exception:
+        travel_time_store = None
+
+omoc_bookings_url = configured_value("OMOC_BOOKINGS_URL")
+omoc_username = configured_value("OMOC_API_USERNAME")
+omoc_password = configured_value("OMOC_API_PASSWORD")
+omoc_client = (
+    create_omoc_client(omoc_bookings_url, omoc_username, omoc_password)
+    if omoc_bookings_url and omoc_username and omoc_password
     else None
 )
 

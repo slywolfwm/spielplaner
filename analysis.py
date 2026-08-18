@@ -31,9 +31,26 @@ ISSUE_COLUMNS = [
 RULE_TEAM_OVERLAP = "Überschneidung Mannschaftspaar"
 RULE_HOME_BUFFER = "Puffer zwischen Heimspielen"
 RULE_TRAVEL_TIME = "Fahrzeit zwischen Spielen"
+RULE_HALL_BOOKING = "Hallenbuchung unvollständig"
 RULE_PRIORITIES = {
     RULE_TEAM_OVERLAP: "Hoch",
     RULE_HOME_BUFFER: "Mittel",
+    RULE_HALL_BOOKING: "Hoch",
+}
+
+HALL_BOOKING_REQUIREMENTS = {
+    "270461": (
+        ("7702", "Halle Süd"),
+        ("7703", "Halle Mitte"),
+        ("7710", "Halle Nord"),
+        ("7730", "Bewirtungsraum (Verkaufsraum)"),
+    ),
+    "270462": (
+        ("7707", "Halle Ost"),
+        ("7708", "Halle Mitte"),
+        ("7709", "Halle West"),
+        ("7725", "Bewirtungsraum (Küche)"),
+    ),
 }
 
 TRAVEL_LEG_COLUMNS = [
@@ -345,6 +362,54 @@ def find_home_game_buffer_conflicts(
     return pd.DataFrame(conflicts, columns=columns)
 
 
+def find_hall_booking_conflicts(
+    blocks: pd.DataFrame, bookings: pd.DataFrame
+) -> pd.DataFrame:
+    """Find home games not fully covered by every required OMOC room booking."""
+    conflicts: list[dict[str, object]] = []
+    for _, block in blocks.iterrows():
+        requirements = HALL_BOOKING_REQUIREMENTS.get(str(block["Hallennummer"]))
+        if not requirements:
+            continue
+        missing_rooms = []
+        for room_id, room_label in requirements:
+            intervals = [
+                (booking["Buchungsbeginn"], booking["Buchungsende"])
+                for _, booking in bookings.iterrows()
+                if room_id in booking["Raum-IDs"]
+            ]
+            if not _interval_is_covered(
+                intervals, block["Vorbereitung ab"], block["Spielende"]
+            ):
+                missing_rooms.append(room_label)
+        if missing_rooms:
+            conflicts.append(
+                {
+                    "Datum": block["Datum"],
+                    "Halle": block["Halle"] or block["Hallennummer"],
+                    "Mannschaft": block["Mannschaft"],
+                    "Gegner": block["Gegner"],
+                    "Anwurf": block["Anwurf"],
+                    "Benötigt von": block["Vorbereitung ab"],
+                    "Benötigt bis": block["Spielende"],
+                    "Fehlende Räume": ", ".join(missing_rooms),
+                }
+            )
+    return pd.DataFrame(
+        conflicts,
+        columns=[
+            "Datum",
+            "Halle",
+            "Mannschaft",
+            "Gegner",
+            "Anwurf",
+            "Benötigt von",
+            "Benötigt bis",
+            "Fehlende Räume",
+        ],
+    )
+
+
 def find_relevant_travel_legs(
     frame: pd.DataFrame,
     team_pairs: list[tuple[Team, Team] | tuple[Team, Team, str]],
@@ -463,6 +528,7 @@ def analyze_schedule(
     team_pairs: list[tuple[Team, Team] | tuple[Team, Team, str]],
     pre_buffer_minutes: int = 30,
     travel_minutes_by_leg: dict[tuple[str, str, str], int] | None = None,
+    hall_bookings: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Run all active rules and return one concise row per finding."""
     findings: list[dict[str, object]] = []
@@ -592,6 +658,31 @@ def analyze_schedule(
             }
         )
 
+    if hall_bookings is not None:
+        for _, conflict in find_hall_booking_conflicts(
+            blocks, hall_bookings
+        ).iterrows():
+            findings.append(
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING],
+                    "Regel": RULE_HALL_BOOKING,
+                    "Datum": conflict["Datum"],
+                    "Spiele": _game_summary(
+                        conflict["Anwurf"],
+                        conflict["Mannschaft"],
+                        conflict["Gegner"],
+                        "gegen",
+                    ),
+                    "Halle": conflict["Halle"],
+                    "Kommentar": (
+                        f"Nicht vollständig gebucht: {conflict['Fehlende Räume']}. "
+                        f"Erforderliches OMOC-Fenster: "
+                        f"{conflict['Benötigt von']:%H:%M}–"
+                        f"{conflict['Benötigt bis']:%H:%M} Uhr."
+                    ),
+                }
+            )
+
     if not findings:
         return pd.DataFrame(columns=ISSUE_COLUMNS)
 
@@ -701,3 +792,21 @@ def _game_summary(
 def _join_unique(*values: object) -> str:
     unique = list(dict.fromkeys(str(value).strip() for value in values if value))
     return " / ".join(unique)
+
+
+def _interval_is_covered(
+    intervals: list[tuple[object, object]], required_start: object, required_end: object
+) -> bool:
+    coverage_end = None
+    for start, end in sorted(intervals, key=lambda item: item[0]):
+        if end <= required_start or start >= required_end:
+            continue
+        if coverage_end is None:
+            if start > required_start:
+                return False
+            coverage_end = end
+        elif start <= coverage_end and end > coverage_end:
+            coverage_end = end
+        if coverage_end >= required_end:
+            return True
+    return False

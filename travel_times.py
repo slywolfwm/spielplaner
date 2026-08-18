@@ -2,39 +2,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import math
-import re
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import httpx
 
 
-ROUTES_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
+AZURE_MAPS_ENDPOINT = "https://atlas.microsoft.com"
+AZURE_MAPS_API_VERSION = "2025-01-01"
+MAX_CACHE_AGE = timedelta(days=180)
 
 
-class GoogleRoutesError(RuntimeError):
-    """A Google Routes request could not be completed."""
+class AzureMapsError(RuntimeError):
+    """An Azure Maps request could not be completed."""
 
 
 @dataclass(frozen=True)
 class RouteEstimate:
-    google_minutes: int
+    source_minutes: int
     planning_minutes: int
     distance_meters: int
+    valid_until: datetime
 
 
-class GoogleRoutesClient:
+class AzureMapsClient:
     def __init__(
         self,
-        api_key: str,
+        subscription_key: str,
         safety_percent: int = 15,
         transfer_buffer_minutes: int = 10,
         http_client: httpx.Client | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ):
-        self.api_key = api_key
+        self.subscription_key = subscription_key
         self.safety_percent = safety_percent
         self.transfer_buffer_minutes = transfer_buffer_minutes
         self.http_client = http_client or httpx.Client(timeout=20.0)
+        self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
 
     def compute_route(
         self,
@@ -45,57 +51,141 @@ class GoogleRoutesClient:
         if not origin.strip() or not destination.strip():
             raise ValueError("Start und Ziel müssen angegeben werden.")
 
-        body: dict[str, object] = {
-            "origin": {"address": _german_address(origin)},
-            "destination": {"address": _german_address(destination)},
-            "travelMode": "DRIVE",
-            "routingPreference": "TRAFFIC_AWARE_OPTIMAL",
-            "trafficModel": "PESSIMISTIC",
-            "languageCode": "de-DE",
-            "units": "METRIC",
+        origin_coordinates = self._geocode(origin)
+        destination_coordinates = self._geocode(destination)
+        body = {
+            "type": "FeatureCollection",
+            "features": [
+                _waypoint(origin_coordinates, 0),
+                _waypoint(destination_coordinates, 1),
+            ],
+            "departAt": _future_departure(
+                departure_time, self.now_provider()
+            ).isoformat(),
+            "optimizeRoute": "fastestWithTraffic",
+            "routeOutputOptions": ["itinerary"],
+            "travelMode": "driving",
         }
-        utc_departure = _future_departure(departure_time)
-        body["departureTime"] = utc_departure.isoformat().replace("+00:00", "Z")
 
         try:
             response = self.http_client.post(
-                ROUTES_ENDPOINT,
-                headers={
-                    "X-Goog-Api-Key": self.api_key,
-                    "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
-                },
+                f"{AZURE_MAPS_ENDPOINT}/route/directions",
+                params={"api-version": AZURE_MAPS_API_VERSION},
+                headers=self._headers("application/geo+json"),
                 json=body,
             )
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise GoogleRoutesError(
-                "Die Fahrzeit konnte nicht bei Google Maps abgefragt werden."
+            raise AzureMapsError(
+                "Die Fahrzeit konnte nicht bei Azure Maps abgefragt werden."
             ) from exc
 
-        routes = data.get("routes", [])
-        if not routes:
-            raise GoogleRoutesError("Google Maps hat keine Fahrtroute gefunden.")
-
-        route = routes[0]
-        seconds = _duration_seconds(str(route.get("duration", "")))
-        google_minutes = max(1, math.ceil(seconds / 60))
+        seconds, distance_meters = _route_summary(data)
+        source_minutes = max(1, math.ceil(seconds / 60))
         planning_minutes = _round_up_to_five(
-            google_minutes * (1 + self.safety_percent / 100)
+            source_minutes * (1 + self.safety_percent / 100)
             + self.transfer_buffer_minutes
         )
         return RouteEstimate(
-            google_minutes=google_minutes,
+            source_minutes=source_minutes,
             planning_minutes=planning_minutes,
-            distance_meters=int(route.get("distanceMeters", 0)),
+            distance_meters=distance_meters,
+            valid_until=_cache_expiry(response, self.now_provider()),
         )
 
+    def _geocode(self, address: str) -> tuple[float, float]:
+        try:
+            response = self.http_client.get(
+                f"{AZURE_MAPS_ENDPOINT}/geocode",
+                params={
+                    "api-version": AZURE_MAPS_API_VERSION,
+                    "query": _german_address(address),
+                    "top": 1,
+                },
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AzureMapsError(
+                "Eine Hallenadresse konnte nicht über Azure Maps gefunden werden."
+            ) from exc
 
-def _duration_seconds(value: str) -> float:
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value)
-    if not match:
-        raise GoogleRoutesError("Google Maps hat keine gültige Fahrzeit geliefert.")
-    return float(match.group(1))
+        features = data.get("features", [])
+        if not features:
+            raise AzureMapsError("Azure Maps hat die Hallenadresse nicht gefunden.")
+        feature = features[0]
+        for point in feature.get("properties", {}).get("geocodePoints", []):
+            if "Route" in point.get("usageTypes", []):
+                return _coordinates(point.get("geometry", {}))
+        return _coordinates(feature.get("geometry", {}))
+
+    def _headers(self, content_type: str | None = None) -> dict[str, str]:
+        headers = {
+            "subscription-key": self.subscription_key,
+            "Accept-Language": "de-DE",
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+
+def _waypoint(coordinates: tuple[float, float], index: int) -> dict[str, object]:
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": list(coordinates)},
+        "properties": {"pointIndex": index, "pointType": "waypoint"},
+    }
+
+
+def _coordinates(geometry: dict[str, object]) -> tuple[float, float]:
+    values = geometry.get("coordinates", [])
+    if not isinstance(values, list) or len(values) < 2:
+        raise AzureMapsError("Azure Maps hat keine gültigen Koordinaten geliefert.")
+    return float(values[0]), float(values[1])
+
+
+def _route_summary(data: object) -> tuple[int, int]:
+    candidates: list[tuple[int, int]] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            duration = value.get("durationTrafficInSeconds") or value.get(
+                "durationInSeconds"
+            )
+            distance = value.get("distanceInMeters")
+            if duration is not None and distance is not None:
+                candidates.append((int(duration), int(distance)))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(data)
+    if not candidates:
+        raise AzureMapsError("Azure Maps hat keine gültige Fahrtroute geliefert.")
+    return max(candidates, key=lambda item: (item[1], item[0]))
+
+
+def _cache_expiry(response: httpx.Response, now: datetime) -> datetime:
+    maximum = now + MAX_CACHE_AGE
+    cache_control = response.headers.get("cache-control", "")
+    for directive in cache_control.split(","):
+        name, _, value = directive.strip().partition("=")
+        if name.casefold() in {"no-cache", "no-store"}:
+            maximum = now
+        if name.casefold() == "max-age" and value.isdigit():
+            maximum = min(maximum, now + timedelta(seconds=int(value)))
+
+    expires = response.headers.get("expires")
+    if expires:
+        try:
+            maximum = min(maximum, parsedate_to_datetime(expires).astimezone(timezone.utc))
+        except (TypeError, ValueError):
+            pass
+    return maximum
 
 
 def _round_up_to_five(value: float) -> int:
@@ -108,8 +198,7 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _future_departure(value: datetime | None) -> datetime:
-    now = datetime.now(timezone.utc)
+def _future_departure(value: datetime | None, now: datetime) -> datetime:
     departure = _as_utc(value) if value is not None else now + timedelta(days=7)
     while departure <= now:
         departure += timedelta(days=7)
