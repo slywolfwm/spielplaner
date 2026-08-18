@@ -35,7 +35,13 @@ from analysis import (
 )
 from duration_store import DurationStore
 from omoc import OmocClient, OmocError
-from pair_matrix import build_pair_matrix, selected_pairs_from_matrix
+from pair_matrix import (
+    TEAM_CATEGORY_ORDER,
+    build_pair_matrix,
+    selected_pairs_from_matrix,
+    sort_pair_labels,
+    team_category,
+)
 from pair_store import PairStore, StoredPair, pair_row_key
 from priorities import PRIORITY_LEVELS, normalize_priority
 from schedule_store import ScheduleStore, StoredSchedule
@@ -170,6 +176,16 @@ def show_page_metrics(items: list[tuple[str, object]]) -> None:
     columns = st.columns(len(items))
     for column, (label, value) in zip(columns, items):
         column.metric(label, value)
+
+
+def show_core_metrics() -> None:
+    show_page_metrics(
+        [
+            ("Spiele im Plan", len(schedule)),
+            ("Mannschaften", len(teams)),
+            ("Aktive Regeln", ACTIVE_RULE_COUNT),
+        ]
+    )
 
 
 def apply_brand_theme() -> None:
@@ -724,6 +740,7 @@ def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
 
 def show_analysis_page() -> None:
     st.header("Spielplanprüfung", help=ANALYSIS_HELP)
+    show_core_metrics()
 
     _, saved_pairs, pair_error = load_saved_pairs()
     if pair_error:
@@ -732,13 +749,6 @@ def show_analysis_page() -> None:
             "Manuell festgelegte Paare werden weiterhin geprüft."
         )
     analysis_pairs, skipped_pairs = pairs_for_analysis(saved_pairs)
-    show_page_metrics(
-        [
-            ("Spiele im Plan", len(schedule)),
-            ("Aktive Regeln", ACTIVE_RULE_COUNT),
-            ("Mannschaftspaare", len(analysis_pairs)),
-        ]
-    )
     if not analysis_pairs:
         st.info(
             "Es ist noch kein gültiges Mannschaftspaar definiert. Die Pufferregel "
@@ -814,13 +824,7 @@ def show_analysis_page() -> None:
 
 def show_duration_page() -> None:
     st.header("Spieldauern", help=DURATION_HELP)
-    show_page_metrics(
-        [
-            ("Mannschaften", len(teams)),
-            ("Dauerprofile", len(duration_settings)),
-            ("Vorlauf je Spiel", f"{PRE_GAME_BUFFER_MINUTES} Min."),
-        ]
-    )
+    show_core_metrics()
 
     duration_notice = st.session_state.pop("duration_notice", "")
     if duration_notice:
@@ -908,7 +912,7 @@ def show_duration_page() -> None:
 
 def show_pair_page() -> None:
     st.header("Mannschaftspaare", help=PAIR_HELP)
-    metrics = st.container()
+    show_core_metrics()
     pair_store, stored_pairs, pair_error = load_saved_pairs()
     if pair_error:
         st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
@@ -932,7 +936,22 @@ def show_pair_page() -> None:
         if pair[0] != pair[1]
     }
 
-    matrix_source, column_teams = build_pair_matrix(labels, active_by_key)
+    matrix_labels = sort_pair_labels(labels)
+    matrix_source, column_teams = build_pair_matrix(matrix_labels, active_by_key)
+    categories = [team_category(label) for label in matrix_labels]
+    category_starts = [
+        index == 0 or category != categories[index - 1]
+        for index, category in enumerate(categories)
+    ]
+    matrix_source.insert(
+        0,
+        "Bereich",
+        [
+            category if is_start else ""
+            for category, is_start in zip(categories, category_starts)
+        ],
+    )
+    matrix_source.insert(0, "_category_start", category_starts)
     matrix_source.insert(0, "_row_index", range(len(matrix_source)))
     editable_cell = JsCode(
         """
@@ -964,10 +983,38 @@ def show_pair_page() -> None:
         }
         """
     )
+    category_row_style = JsCode(
+        """
+        function(params) {
+            if (params.data._category_start && params.data._row_index > 0) {
+                return {borderTop: '2px solid #9bb2d1'};
+            }
+            return null;
+        }
+        """
+    )
     column_defs = [
         {
             "field": "_row_index",
             "hide": True,
+        },
+        {
+            "field": "_category_start",
+            "hide": True,
+        },
+        {
+            "field": "Bereich",
+            "headerName": "Bereich",
+            "pinned": "left",
+            "lockPinned": True,
+            "editable": False,
+            "width": 135,
+            "minWidth": 125,
+            "cellStyle": {
+                "fontWeight": "700",
+                "backgroundColor": "#edf2f8",
+                "color": "#053782",
+            },
         },
         {
             "field": "Mannschaft",
@@ -984,21 +1031,33 @@ def show_pair_page() -> None:
             },
         },
     ]
-    column_defs.extend(
-        {
-            "field": heading,
-            "headerName": heading,
-            "headerTooltip": concise_team_label(team_label),
-            "matrixIndex": column_index,
-            "editable": editable_cell,
-            "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": ["", *PRIORITY_LEVELS]},
-            "cellStyle": priority_cell_style,
-            "width": 105,
-            "minWidth": 90,
-        }
-        for column_index, (heading, team_label) in enumerate(column_teams.items())
-    )
+    indexed_columns = list(enumerate(column_teams.items()))
+    for category in TEAM_CATEGORY_ORDER:
+        children = [
+            {
+                "field": heading,
+                "headerName": heading,
+                "headerTooltip": concise_team_label(team_label),
+                "matrixIndex": column_index,
+                "editable": editable_cell,
+                "cellEditor": "agSelectCellEditor",
+                "cellEditorParams": {"values": ["", *PRIORITY_LEVELS]},
+                "cellStyle": priority_cell_style,
+                "width": 105,
+                "minWidth": 90,
+            }
+            for column_index, (heading, team_label) in indexed_columns
+            if team_category(team_label) == category
+        ]
+        if children:
+            column_defs.append(
+                {
+                    "headerName": category,
+                    "marryChildren": True,
+                    "children": children,
+                }
+            )
+    matrix_font = asset_data_uri(BRAND_FONT_MEDIUM, "font/ttf")
     grid_response = AgGrid(
         matrix_source,
         gridOptions={
@@ -1009,8 +1068,10 @@ def show_pair_page() -> None:
                 "resizable": True,
                 "suppressMovable": True,
             },
+            "getRowStyle": category_row_style,
             "rowHeight": 38,
             "headerHeight": 42,
+            "groupHeaderHeight": 36,
             "alwaysShowHorizontalScroll": True,
             "suppressColumnVirtualisation": True,
             "stopEditingWhenCellsLoseFocus": True,
@@ -1021,17 +1082,26 @@ def show_pair_page() -> None:
         enable_enterprise_modules=False,
         update_on=["cellValueChanged"],
         custom_css={
+            "@font-face": {
+                "font-family": "'Eras Matrix'",
+                "src": f"url('{matrix_font}') format('truetype')",
+                "font-style": "normal",
+                "font-weight": "500",
+            },
             ".ag-root-wrapper": {
                 "border": "1px solid #e5e7eb",
                 "border-radius": "0.85rem",
                 "overflow": "hidden",
             },
-            ".ag-header-cell-label": {
-                "font-family": "Eras Web, Trebuchet MS, sans-serif",
+            ".ag-root-wrapper, .ag-select-list-item, .ag-popup, "
+            ".ag-header-cell-label, .ag-header-group-cell-label": {
+                "font-family": "'Eras Matrix', 'Trebuchet MS', sans-serif",
+            },
+            ".ag-header-cell-label, .ag-header-group-cell-label": {
                 "font-weight": "700",
             },
             ".ag-cell": {
-                "font-family": "Eras Web, Trebuchet MS, sans-serif",
+                "font-family": "'Eras Matrix', 'Trebuchet MS', sans-serif",
                 "display": "flex",
                 "align-items": "center",
             },
@@ -1039,25 +1109,18 @@ def show_pair_page() -> None:
         key="pair_matrix_editor",
     )
     matrix = pd.DataFrame(grid_response.data).drop(
-        columns="_row_index", errors="ignore"
+        columns=["_row_index", "_category_start", "Bereich"], errors="ignore"
     )
-    selected_pairs = selected_pairs_from_matrix(matrix, labels, column_teams)
+    selected_pairs = selected_pairs_from_matrix(matrix, matrix_labels, column_teams)
     selected_by_key = {
         pair_row_key(team_a, team_b): (team_a, team_b, priority)
         for team_a, team_b, priority in selected_pairs
     }
     st.session_state["manual_pairs"] = selected_pairs
-    with metrics:
-        show_page_metrics(
-            [
-                ("Ausgewählt", len(selected_pairs)),
-                ("Gespeichert", len(stored_pairs)),
-                ("Mögliche Paare", len(labels) * (len(labels) - 1) // 2),
-            ]
-        )
     st.caption(
-        f"{len(selected_pairs)} Paarung(en) ausgewählt. Eine leere Zelle bedeutet "
-        "keine Prüfung. Die graue untere Hälfte ist gesperrt."
+        f"{len(selected_pairs)} Paarung(en) ausgewählt. Die Achsen sind nach "
+        "Altersbereichen gruppiert. Eine leere Zelle bedeutet keine Prüfung; "
+        "die graue untere Hälfte ist gesperrt."
     )
 
     if not access.can_edit_pairings:
@@ -1093,25 +1156,13 @@ def show_pair_page() -> None:
 
 def show_travel_page() -> None:
     st.header("Fahrzeiten", help=TRAVEL_HELP)
+    show_core_metrics()
 
     _, saved_pairs, pair_error = load_saved_pairs()
     if pair_error:
         st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
     analysis_pairs, _ = pairs_for_analysis(saved_pairs)
     legs = relevant_travel_legs(analysis_pairs)
-    route_count = (
-        len(legs[["Startschlüssel", "Zielschlüssel"]].drop_duplicates())
-        if not legs.empty
-        else 0
-    )
-    show_page_metrics(
-        [
-            ("Relevante Abfolgen", len(legs)),
-            ("Hallenverbindungen", route_count),
-            ("Maximale Lücke", f"{MAX_RELEVANT_TRAVEL_GAP_MINUTES // 60} Std."),
-        ]
-    )
-
     if legs.empty:
         st.info("Für die aktuellen Mannschaftspaare ist keine Fahrstrecke relevant.")
     else:
@@ -1158,13 +1209,7 @@ def show_travel_page() -> None:
 
 def show_guide_page() -> None:
     st.header("Anleitung")
-    show_page_metrics(
-        [
-            ("Mannschaften", len(teams)),
-            ("Aktive Regeln", ACTIVE_RULE_COUNT),
-            ("OMOC-Hallen", len(HALL_BOOKING_REQUIREMENTS)),
-        ]
-    )
+    show_core_metrics()
     st.markdown(
         "Der Spielplaner kontrolliert die Spiele des TSV Weilheim und der "
         "weiblichen A-Jugend des BSC Oberhausen in der Saison 2026/27. Ein "

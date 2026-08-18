@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import re
 
 import pandas as pd
 
 from pair_store import pair_row_key
 from priorities import PRIORITY_LEVELS
+
+
+TEAM_CATEGORY_ORDER = (
+    "Erwachsene",
+    "Weibliche Jugend",
+    "Männliche Jugend",
+    "Kinder",
+)
 
 
 def matrix_team_label(label: str) -> str:
@@ -20,6 +29,59 @@ def matrix_team_label(label: str) -> str:
         if concise.startswith(prefix):
             return f"{replacement}{concise.removeprefix(prefix)}"
     return concise
+
+
+def team_category(label: str) -> str:
+    """Return the display group used on both matrix axes."""
+    concise = matrix_team_label(label)
+    if re.search(r"\b(?:Herren|Damen)\b", concise, flags=re.IGNORECASE):
+        return "Erwachsene"
+    if re.search(r"\bw[ABC]\b", concise):
+        return "Weibliche Jugend"
+    if re.search(r"\bm[ABC]\b", concise):
+        return "Männliche Jugend"
+    return "Kinder"
+
+
+def sort_pair_labels(labels: Sequence[str]) -> list[str]:
+    """Sort teams by age group and then by their handball age class."""
+
+    def sort_key(label: str) -> tuple[int, int, str]:
+        concise = matrix_team_label(label)
+        category = team_category(label)
+        category_rank = TEAM_CATEGORY_ORDER.index(category)
+        if category == "Erwachsene":
+            age_rank = 0 if re.search(r"\bHerren\b", concise) else 1
+        elif category == "Weibliche Jugend":
+            age_rank = next(
+                index
+                for index, age in enumerate(("wA", "wB", "wC"))
+                if re.search(rf"\b{age}\b", concise)
+            )
+        elif category == "Männliche Jugend":
+            age_rank = next(
+                index
+                for index, age in enumerate(("mA", "mB", "mC"))
+                if re.search(rf"\b{age}\b", concise)
+            )
+        else:
+            child_markers = (
+                r"\bwD\b",
+                r"\bmD\b",
+                r"\bE-Jugend\b",
+                r"\bMinis\b",
+            )
+            age_rank = next(
+                (
+                    index
+                    for index, marker in enumerate(child_markers)
+                    if re.search(marker, concise)
+                ),
+                len(child_markers),
+            )
+        return category_rank, age_rank, concise.casefold()
+
+    return sorted(labels, key=sort_key)
 
 
 def build_pair_matrix(

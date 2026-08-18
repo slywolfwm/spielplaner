@@ -1,6 +1,11 @@
 import pandas as pd
 
-from pair_matrix import build_pair_matrix, selected_pairs_from_matrix
+from pair_matrix import (
+    build_pair_matrix,
+    selected_pairs_from_matrix,
+    sort_pair_labels,
+    team_category,
+)
 from pair_store import pair_row_key
 
 
@@ -34,3 +39,39 @@ def test_pair_matrix_makes_duplicate_axis_labels_unique():
     _, column_teams = build_pair_matrix(labels, {})
 
     assert list(column_teams) == ["Verein A – Team", "Verein A – Team 2"]
+
+
+def test_pair_matrix_sorts_adults_then_female_male_and_children():
+    labels = [
+        "TSV Weilheim – Minis",
+        "TSV Weilheim – BOL mC S (BOL mC)",
+        "TSV Weilheim – Damen II",
+        "TSV Weilheim – BOL wC S2 (BOL wC)",
+        "TSV Weilheim – Herren",
+        "BSC Oberhausen – BOL wA SW (BOL wA)",
+        "TSV Weilheim – BOL mA SW (BOL mA)",
+        "TSV Weilheim – wD",
+    ]
+
+    sorted_labels = sort_pair_labels(labels)
+
+    assert sorted_labels == [
+        "TSV Weilheim – Herren",
+        "TSV Weilheim – Damen II",
+        "BSC Oberhausen – BOL wA SW (BOL wA)",
+        "TSV Weilheim – BOL wC S2 (BOL wC)",
+        "TSV Weilheim – BOL mA SW (BOL mA)",
+        "TSV Weilheim – BOL mC S (BOL mC)",
+        "TSV Weilheim – wD",
+        "TSV Weilheim – Minis",
+    ]
+    assert [team_category(label) for label in sorted_labels] == [
+        "Erwachsene",
+        "Erwachsene",
+        "Weibliche Jugend",
+        "Weibliche Jugend",
+        "Männliche Jugend",
+        "Männliche Jugend",
+        "Kinder",
+        "Kinder",
+    ]

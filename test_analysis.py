@@ -344,6 +344,7 @@ def test_hall_booking_requires_all_parts_and_catering_room_for_full_window():
     conflicts = find_hall_booking_conflicts(blocks, bookings)
 
     assert len(conflicts) == 1
+    assert conflicts.iloc[0]["Halle"] == "Jahnhalle"
     assert conflicts.iloc[0]["Fehlende Räume"] == "Bewirtungsraum (Verkaufsraum)"
 
 
@@ -452,8 +453,10 @@ def test_schedule_analysis_reports_one_missing_hall_booking_finding_per_day():
     assert len(result) == 1
     assert result.iloc[0]["Regel"] == RULE_HALL_BOOKING
     assert result.iloc[0]["Priorität"] == "Hoch"
-    assert "Halle Ost" in result.iloc[0]["Kommentar"]
-    assert "Bewirtungsraum (Küche)" in result.iloc[0]["Kommentar"]
+    assert result.iloc[0]["Halle"] == "Hardtschule"
+    assert "Hardtschule nicht vollständig gebucht" in result.iloc[0]["Kommentar"]
+    assert "Halle Ost" not in result.iloc[0]["Kommentar"]
+    assert "Bewirtungsraum (Küche)" not in result.iloc[0]["Kommentar"]
 
 
 def test_schedule_analysis_reports_excess_hall_booking_as_low_priority():

@@ -56,6 +56,10 @@ HALL_BOOKING_REQUIREMENTS = {
         ("7725", "Bewirtungsraum (Küche)"),
     ),
 }
+HALL_BOOKING_DISPLAY_NAMES = {
+    "270461": "Jahnhalle",
+    "270462": "Hardtschule",
+}
 
 TRAVEL_LEG_COLUMNS = [
     "Priorität",
@@ -743,7 +747,7 @@ def analyze_schedule(
                     "Spiele": conflict["Spiele"],
                     "Halle": conflict["Halle"],
                     "Kommentar": (
-                        f"Nicht vollständig gebucht: {conflict['Fehlende Räume']}. "
+                        f"{conflict['Halle']} nicht vollständig gebucht. "
                         f"Erforderliches OMOC-Fenster: "
                         f"{conflict['Benötigt von']:%H:%M}-"
                         f"{conflict['Benötigt bis']:%H:%M} Uhr."
@@ -915,7 +919,9 @@ def _hall_booking_days(
             {
                 "Datum": first["Datum"],
                 "Hallennummer": str(hall_number),
-                "Halle": first["Halle"] or str(hall_number),
+                "Halle": HALL_BOOKING_DISPLAY_NAMES.get(
+                    str(hall_number), first["Halle"] or str(hall_number)
+                ),
                 "Spiele": " | ".join(
                     _game_summary(
                         game["Anwurf"],
