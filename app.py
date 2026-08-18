@@ -2,7 +2,6 @@ import os
 from base64 import b64encode
 from hashlib import sha256
 from io import BytesIO
-from itertools import combinations
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,6 +17,7 @@ from analysis import (
     HALL_BOOKING_REQUIREMENTS,
     RULE_HOME_BUFFER,
     RULE_HALL_BOOKING,
+    RULE_HALL_BOOKING_EXCESS,
     RULE_PRIORITIES,
     RULE_TEAM_OVERLAP,
     RULE_TRAVEL_TIME,
@@ -34,6 +34,7 @@ from analysis import (
 )
 from duration_store import DurationStore
 from omoc import OmocClient, OmocError
+from pair_matrix import build_pair_matrix, selected_pairs_from_matrix
 from pair_store import PairStore, StoredPair, pair_row_key
 from priorities import PRIORITY_LEVELS, normalize_priority
 from schedule_store import ScheduleStore, StoredSchedule
@@ -58,7 +59,8 @@ BRAND_FONT_BOLD = APP_DIR / "static" / "eras-bold.ttf"
 ANALYSIS_HELP = (
     "Prüft den gesamten Spielplan auf Überschneidungen der festgelegten "
     "Mannschaftspaare, zu knappe Fahrzeiten und fehlenden Puffer zwischen "
-    "Heimspielen. Die Ergebnisse werden nach Priorität sortiert."
+    "Heimspielen sowie auf fehlende oder unnötig lange Hallenbuchungen. Die "
+    "Ergebnisse werden nach Priorität sortiert."
 )
 DURATION_HELP = (
     "Lege je Mannschaft die Regeldauer einschließlich Halbzeit und einen "
@@ -899,61 +901,43 @@ def show_pair_page() -> None:
         if pair[0] != pair[1]
     }
 
-    rows = []
-    for label_a, label_b in combinations(labels, 2):
-        row_key = pair_row_key(label_a, label_b)
-        rows.append(
-            {
-                "PaarKey": row_key,
-                "TeamA": label_a,
-                "TeamB": label_b,
-                "Auswählen": row_key in active_by_key,
-                "Mannschaft A": concise_team_label(label_a),
-                "Mannschaft B": concise_team_label(label_b),
-                "Priorität": active_by_key.get(
-                    row_key,
-                    stored_by_key.get(row_key).priority
-                    if row_key in stored_by_key
-                    else PRIORITY_LEVELS[0],
-                ),
-            }
+    matrix_source, column_teams = build_pair_matrix(labels, active_by_key)
+    matrix_columns = {
+        "Mannschaft": st.column_config.TextColumn(
+            width="medium",
+            disabled=True,
+            pinned=True,
         )
-
+    }
+    matrix_columns.update(
+        {
+            heading: st.column_config.SelectboxColumn(
+                label=heading,
+                help=concise_team_label(team_label),
+                options=("", *PRIORITY_LEVELS),
+                width="small",
+            )
+            for heading, team_label in column_teams.items()
+        }
+    )
     matrix = st.data_editor(
-        pd.DataFrame(rows),
+        matrix_source,
         hide_index=True,
         width="stretch",
         height=520,
-        disabled=["Mannschaft A", "Mannschaft B"],
-        column_config={
-            "PaarKey": None,
-            "TeamA": None,
-            "TeamB": None,
-            "Auswählen": st.column_config.CheckboxColumn(width="small"),
-            "Mannschaft A": st.column_config.TextColumn(width="medium"),
-            "Mannschaft B": st.column_config.TextColumn(width="medium"),
-            "Priorität": st.column_config.SelectboxColumn(
-                options=PRIORITY_LEVELS,
-                required=True,
-                width="small",
-            ),
-        },
+        disabled=["Mannschaft"],
+        column_config=matrix_columns,
         key="pair_matrix_editor",
     )
-
-    selected_by_key: dict[str, tuple[str, str, str]] = {}
-    for _, row in matrix.loc[matrix["Auswählen"]].iterrows():
-        row_key = str(row["PaarKey"])
-        selected_by_key[row_key] = (
-            str(row["TeamA"]),
-            str(row["TeamB"]),
-            normalize_priority(row["Priorität"]),
-        )
-    selected_pairs = list(selected_by_key.values())
+    selected_pairs = selected_pairs_from_matrix(matrix, labels, column_teams)
+    selected_by_key = {
+        pair_row_key(team_a, team_b): (team_a, team_b, priority)
+        for team_a, team_b, priority in selected_pairs
+    }
     st.session_state["manual_pairs"] = selected_pairs
     st.caption(
-        f"{len(selected_pairs)} Paarung(en) ausgewählt · jede Kombination wird "
-        "genau einmal geführt."
+        f"{len(selected_pairs)} Paarung(en) ausgewählt. Eine leere Zelle bedeutet "
+        "keine Prüfung. Nur die obere Hälfte der Matrix wird ausgewertet."
     )
 
     if not access.can_edit_pairings:
@@ -1083,6 +1067,9 @@ def show_guide_page() -> None:
         "Für Heimspiele in Jahnhalle und Hardtschule gleicht die App das gesamte "
         "Planungsfenster mit OMOC ab. Erforderlich sind jeweils alle drei "
         "Hallenteile sowie Verkaufsraum beziehungsweise Küche als Bewirtungsraum. "
+        "Das Tagesfenster beginnt 45 Minuten vor dem ersten Spiel und endet "
+        "45 Minuten nach dem berechneten Ende des letzten Spiels. Fehlende und "
+        "unnötig lange Buchungszeiten werden getrennt ausgewiesen. "
         "Andere Sportstätten, Kostensätze und personenbezogene Buchungsdaten werden "
         "nicht verarbeitet."
     )
@@ -1117,6 +1104,11 @@ def show_guide_page() -> None:
                     "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING],
                     "Regel": RULE_HALL_BOOKING,
                     "Prüfumfang": "Jahnhalle und Hardtschule einschließlich Bewirtungsraum",
+                },
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING_EXCESS],
+                    "Regel": RULE_HALL_BOOKING_EXCESS,
+                    "Prüfumfang": "Buchungszeit vor Aufbau und nach Abbau",
                 },
             ]
         ),

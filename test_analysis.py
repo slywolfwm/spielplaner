@@ -4,6 +4,7 @@ from analysis import (
     ISSUE_COLUMNS,
     RULE_HOME_BUFFER,
     RULE_HALL_BOOKING,
+    RULE_HALL_BOOKING_EXCESS,
     RULE_TEAM_OVERLAP,
     RULE_TRAVEL_TIME,
     Team,
@@ -13,6 +14,7 @@ from analysis import (
     default_stoppage_buffer,
     find_home_game_buffer_conflicts,
     find_hall_booking_conflicts,
+    find_hall_booking_excesses,
     find_overlaps,
     find_relevant_travel_legs,
     home_game_blocks,
@@ -327,13 +329,13 @@ def test_hall_booking_requires_all_parts_and_catering_room_for_full_window():
     bookings = pd.DataFrame(
         [
             {
-                "Buchungsbeginn": pd.Timestamp("2026-09-20 16:30"),
-                "Buchungsende": pd.Timestamp("2026-09-20 19:00"),
+                "Buchungsbeginn": pd.Timestamp("2026-09-20 16:45"),
+                "Buchungsende": pd.Timestamp("2026-09-20 19:35"),
                 "Raum-IDs": frozenset({"7702", "7703", "7710"}),
             },
             {
                 "Buchungsbeginn": pd.Timestamp("2026-09-20 17:30"),
-                "Buchungsende": pd.Timestamp("2026-09-20 19:00"),
+                "Buchungsende": pd.Timestamp("2026-09-20 19:35"),
                 "Raum-IDs": frozenset({"7730"}),
             },
         ]
@@ -345,7 +347,82 @@ def test_hall_booking_requires_all_parts_and_catering_room_for_full_window():
     assert conflicts.iloc[0]["Fehlende Räume"] == "Bewirtungsraum (Verkaufsraum)"
 
 
-def test_schedule_analysis_reports_one_hall_booking_finding_per_game():
+def test_hall_booking_uses_first_and_last_game_with_setup_and_teardown():
+    blocks = pd.DataFrame(
+        [
+            {
+                "Datum": pd.Timestamp("2026-09-20").date(),
+                "Hallennummer": "270461",
+                "Halle": "Weilheim, Jahnhalle",
+                "Mannschaft": "TSV Weilheim – E-Jugend",
+                "Gegner": "Gegner 1",
+                "Anwurf": pd.Timestamp("2026-09-20 10:00"),
+                "Spielende": pd.Timestamp("2026-09-20 10:25"),
+            },
+            {
+                "Datum": pd.Timestamp("2026-09-20").date(),
+                "Hallennummer": "270461",
+                "Halle": "Weilheim, Jahnhalle",
+                "Mannschaft": "TSV Weilheim – Herren",
+                "Gegner": "Gegner 2",
+                "Anwurf": pd.Timestamp("2026-09-20 17:30"),
+                "Spielende": pd.Timestamp("2026-09-20 18:50"),
+            },
+        ]
+    )
+    bookings = pd.DataFrame(
+        [
+            {
+                "Buchungsbeginn": pd.Timestamp("2026-09-20 09:15"),
+                "Buchungsende": pd.Timestamp("2026-09-20 19:35"),
+                "Raum-IDs": frozenset({"7702", "7703", "7710", "7730"}),
+            }
+        ]
+    )
+
+    assert find_hall_booking_conflicts(blocks, bookings).empty
+    assert find_hall_booking_excesses(blocks, bookings).empty
+
+
+def test_hall_booking_flags_excess_connected_to_required_window_once_per_day():
+    blocks = pd.DataFrame(
+        [
+            {
+                "Datum": pd.Timestamp("2026-09-20").date(),
+                "Hallennummer": "270461",
+                "Halle": "Weilheim, Jahnhalle",
+                "Mannschaft": "TSV Weilheim – Herren",
+                "Gegner": "Gegner",
+                "Anwurf": pd.Timestamp("2026-09-20 17:30"),
+                "Spielende": pd.Timestamp("2026-09-20 18:50"),
+            }
+        ]
+    )
+    bookings = pd.DataFrame(
+        [
+            {
+                "Buchungsbeginn": pd.Timestamp("2026-09-20 16:15"),
+                "Buchungsende": pd.Timestamp("2026-09-20 20:05"),
+                "Raum-IDs": frozenset({"7702", "7703", "7710", "7730"}),
+            },
+            {
+                "Buchungsbeginn": pd.Timestamp("2026-09-20 21:00"),
+                "Buchungsende": pd.Timestamp("2026-09-20 22:00"),
+                "Raum-IDs": frozenset({"7702", "7703", "7710", "7730"}),
+            },
+        ]
+    )
+
+    excesses = find_hall_booking_excesses(blocks, bookings)
+
+    assert len(excesses) == 1
+    assert "30 Min. davor und 30 Min. danach" in excesses.iloc[0][
+        "Zusätzliche Zeit"
+    ]
+    assert "21:00" not in excesses.iloc[0]["Zusätzliche Zeit"]
+
+
+def test_schedule_analysis_reports_one_missing_hall_booking_finding_per_day():
     frame = pd.DataFrame(
         [
             {
@@ -377,3 +454,43 @@ def test_schedule_analysis_reports_one_hall_booking_finding_per_game():
     assert result.iloc[0]["Priorität"] == "Hoch"
     assert "Halle Ost" in result.iloc[0]["Kommentar"]
     assert "Bewirtungsraum (Küche)" in result.iloc[0]["Kommentar"]
+
+
+def test_schedule_analysis_reports_excess_hall_booking_as_low_priority():
+    frame = pd.DataFrame(
+        [
+            {
+                "Anwurf": pd.Timestamp("2026-10-03 17:30"),
+                "Hallennummer": "270462",
+                "Inhalt Tooltip Halle": "Weilheim, Am Hardt",
+                "Spielnummer": "1",
+                "Liga": "M",
+                "Staffelkurzbezeichnung": "Herren",
+                "Heimmannschaft": "TSV Weilheim",
+                "Gastmannschaft": "Gegner",
+            }
+        ]
+    )
+    team = Team("a", "TSV Weilheim – Herren", "TSV Weilheim", "M", "Herren")
+    bookings = pd.DataFrame(
+        [
+            {
+                "Buchungsbeginn": pd.Timestamp("2026-10-03 16:30"),
+                "Buchungsende": pd.Timestamp("2026-10-03 20:00"),
+                "Raum-IDs": frozenset({"7707", "7708", "7709", "7725"}),
+            }
+        ]
+    )
+
+    result = analyze_schedule(
+        frame,
+        [team],
+        {"a": 80},
+        [],
+        hall_bookings=bookings,
+    )
+
+    assert len(result) == 1
+    assert result.iloc[0]["Regel"] == RULE_HALL_BOOKING_EXCESS
+    assert result.iloc[0]["Priorität"] == "Niedrig"
+    assert "15 Min. davor und 25 Min. danach" in result.iloc[0]["Kommentar"]

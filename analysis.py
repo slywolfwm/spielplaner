@@ -32,10 +32,14 @@ RULE_TEAM_OVERLAP = "Überschneidung Mannschaftspaar"
 RULE_HOME_BUFFER = "Puffer zwischen Heimspielen"
 RULE_TRAVEL_TIME = "Fahrzeit zwischen Spielen"
 RULE_HALL_BOOKING = "Hallenbuchung unvollständig"
+RULE_HALL_BOOKING_EXCESS = "Hallenbuchung zu lang"
+HALL_SETUP_MINUTES = 45
+HALL_TEARDOWN_MINUTES = 45
 RULE_PRIORITIES = {
     RULE_TEAM_OVERLAP: "Hoch",
     RULE_HOME_BUFFER: "Mittel",
     RULE_HALL_BOOKING: "Hoch",
+    RULE_HALL_BOOKING_EXCESS: "Niedrig",
 }
 
 HALL_BOOKING_REQUIREMENTS = {
@@ -363,14 +367,15 @@ def find_home_game_buffer_conflicts(
 
 
 def find_hall_booking_conflicts(
-    blocks: pd.DataFrame, bookings: pd.DataFrame
+    blocks: pd.DataFrame,
+    bookings: pd.DataFrame,
+    setup_minutes: int = HALL_SETUP_MINUTES,
+    teardown_minutes: int = HALL_TEARDOWN_MINUTES,
 ) -> pd.DataFrame:
-    """Find home games not fully covered by every required OMOC room booking."""
+    """Find hall days not fully covered by every required OMOC room booking."""
     conflicts: list[dict[str, object]] = []
-    for _, block in blocks.iterrows():
-        requirements = HALL_BOOKING_REQUIREMENTS.get(str(block["Hallennummer"]))
-        if not requirements:
-            continue
+    for day in _hall_booking_days(blocks, setup_minutes, teardown_minutes):
+        requirements = HALL_BOOKING_REQUIREMENTS[day["Hallennummer"]]
         missing_rooms = []
         for room_id, room_label in requirements:
             intervals = [
@@ -379,19 +384,13 @@ def find_hall_booking_conflicts(
                 if room_id in booking["Raum-IDs"]
             ]
             if not _interval_is_covered(
-                intervals, block["Vorbereitung ab"], block["Spielende"]
+                intervals, day["Benötigt von"], day["Benötigt bis"]
             ):
                 missing_rooms.append(room_label)
         if missing_rooms:
             conflicts.append(
                 {
-                    "Datum": block["Datum"],
-                    "Halle": block["Halle"] or block["Hallennummer"],
-                    "Mannschaft": block["Mannschaft"],
-                    "Gegner": block["Gegner"],
-                    "Anwurf": block["Anwurf"],
-                    "Benötigt von": block["Vorbereitung ab"],
-                    "Benötigt bis": block["Spielende"],
+                    **day,
                     "Fehlende Räume": ", ".join(missing_rooms),
                 }
             )
@@ -399,13 +398,87 @@ def find_hall_booking_conflicts(
         conflicts,
         columns=[
             "Datum",
+            "Hallennummer",
             "Halle",
-            "Mannschaft",
-            "Gegner",
-            "Anwurf",
+            "Spiele",
             "Benötigt von",
             "Benötigt bis",
             "Fehlende Räume",
+        ],
+    )
+
+
+def find_hall_booking_excesses(
+    blocks: pd.DataFrame,
+    bookings: pd.DataFrame,
+    setup_minutes: int = HALL_SETUP_MINUTES,
+    teardown_minutes: int = HALL_TEARDOWN_MINUTES,
+) -> pd.DataFrame:
+    """Find connected OMOC bookings extending beyond a hall day's need."""
+    excesses: list[dict[str, object]] = []
+    for day in _hall_booking_days(blocks, setup_minutes, teardown_minutes):
+        requirements = HALL_BOOKING_REQUIREMENTS[day["Hallennummer"]]
+        grouped_rooms: dict[tuple[int, int], list[str]] = {}
+        for room_id, room_label in requirements:
+            intervals = _merge_intervals(
+                [
+                    (booking["Buchungsbeginn"], booking["Buchungsende"])
+                    for _, booking in bookings.iterrows()
+                    if room_id in booking["Raum-IDs"]
+                ]
+            )
+            before = 0
+            after = 0
+            for start, end in intervals:
+                if end <= day["Benötigt von"] or start >= day["Benötigt bis"]:
+                    continue
+                before = max(
+                    before,
+                    max(
+                        0,
+                        int(
+                            (day["Benötigt von"] - start).total_seconds() // 60
+                        ),
+                    ),
+                )
+                after = max(
+                    after,
+                    max(
+                        0,
+                        int((end - day["Benötigt bis"]).total_seconds() // 60),
+                    ),
+                )
+            if before or after:
+                grouped_rooms.setdefault((before, after), []).append(room_label)
+
+        if grouped_rooms:
+            details = []
+            for (before, after), room_labels in grouped_rooms.items():
+                rooms = ", ".join(room_labels)
+                if before and after:
+                    deviation = f"{before} Min. davor und {after} Min. danach"
+                elif before:
+                    deviation = f"{before} Min. davor"
+                else:
+                    deviation = f"{after} Min. danach"
+                details.append(f"{rooms}: {deviation}")
+            excesses.append(
+                {
+                    **day,
+                    "Zusätzliche Zeit": "; ".join(details),
+                }
+            )
+
+    return pd.DataFrame(
+        excesses,
+        columns=[
+            "Datum",
+            "Hallennummer",
+            "Halle",
+            "Spiele",
+            "Benötigt von",
+            "Benötigt bis",
+            "Zusätzliche Zeit",
         ],
     )
 
@@ -667,18 +740,31 @@ def analyze_schedule(
                     "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING],
                     "Regel": RULE_HALL_BOOKING,
                     "Datum": conflict["Datum"],
-                    "Spiele": _game_summary(
-                        conflict["Anwurf"],
-                        conflict["Mannschaft"],
-                        conflict["Gegner"],
-                        "gegen",
-                    ),
+                    "Spiele": conflict["Spiele"],
                     "Halle": conflict["Halle"],
                     "Kommentar": (
                         f"Nicht vollständig gebucht: {conflict['Fehlende Räume']}. "
                         f"Erforderliches OMOC-Fenster: "
-                        f"{conflict['Benötigt von']:%H:%M}–"
+                        f"{conflict['Benötigt von']:%H:%M}-"
                         f"{conflict['Benötigt bis']:%H:%M} Uhr."
+                    ),
+                }
+            )
+        for _, excess in find_hall_booking_excesses(
+            blocks, hall_bookings
+        ).iterrows():
+            findings.append(
+                {
+                    "Priorität": RULE_PRIORITIES[RULE_HALL_BOOKING_EXCESS],
+                    "Regel": RULE_HALL_BOOKING_EXCESS,
+                    "Datum": excess["Datum"],
+                    "Spiele": excess["Spiele"],
+                    "Halle": excess["Halle"],
+                    "Kommentar": (
+                        f"Nicht benötigte Buchungszeit: "
+                        f"{excess['Zusätzliche Zeit']}. Benötigtes OMOC-Fenster: "
+                        f"{excess['Benötigt von']:%H:%M}-"
+                        f"{excess['Benötigt bis']:%H:%M} Uhr."
                     ),
                 }
             )
@@ -810,3 +896,56 @@ def _interval_is_covered(
         if coverage_end >= required_end:
             return True
     return False
+
+
+def _hall_booking_days(
+    blocks: pd.DataFrame, setup_minutes: int, teardown_minutes: int
+) -> list[dict[str, object]]:
+    target_blocks = blocks.loc[
+        blocks["Hallennummer"].astype(str).isin(HALL_BOOKING_REQUIREMENTS)
+    ]
+    days: list[dict[str, object]] = []
+    for (_, hall_number), hall_games in target_blocks.groupby(
+        ["Datum", "Hallennummer"], sort=True
+    ):
+        hall_games = hall_games.sort_values("Anwurf")
+        first = hall_games.iloc[0]
+        last = hall_games.iloc[-1]
+        days.append(
+            {
+                "Datum": first["Datum"],
+                "Hallennummer": str(hall_number),
+                "Halle": first["Halle"] or str(hall_number),
+                "Spiele": " | ".join(
+                    _game_summary(
+                        game["Anwurf"],
+                        game["Mannschaft"],
+                        game["Gegner"],
+                        "gegen",
+                    )
+                    for _, game in hall_games.iterrows()
+                ),
+                "Benötigt von": first["Anwurf"]
+                - pd.Timedelta(minutes=int(setup_minutes)),
+                "Benötigt bis": last["Spielende"]
+                + pd.Timedelta(minutes=int(teardown_minutes)),
+            }
+        )
+    return days
+
+
+def _merge_intervals(
+    intervals: list[tuple[object, object]],
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    merged: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for raw_start, raw_end in sorted(intervals, key=lambda item: item[0]):
+        start = pd.Timestamp(raw_start)
+        end = pd.Timestamp(raw_end)
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        if end > merged[-1][1]:
+            merged[-1] = (merged[-1][0], end)
+    return merged

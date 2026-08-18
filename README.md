@@ -23,12 +23,13 @@ Die Navigation teilt die App in fünf Seiten auf:
   Hallenverbindungen.
 - **Anleitung** bündelt die Erläuterungen zur Bedienung und zu den Prüfregeln.
 
-Aktuell sind vier Regeln aktiv: Für Überschneidungen definierter
+Aktuell sind fünf Regeln aktiv: Für Überschneidungen definierter
 Mannschaftspaare wird die Priorität je Paar als **hoch**, **mittel** oder
 **niedrig** festgelegt. Dieselbe Priorität gilt für eine zu knappe Fahrzeit
 zwischen zwei Spielen dieses Paars. Ein fehlender Puffer zwischen Heimspielen
 hat die Priorität **mittel**. Unvollständige OMOC-Buchungen für Jahnhalle und
-Hardtschule haben die Priorität **hoch**. Pro Auffälligkeit wird genau eine Zeile
+Hardtschule haben die Priorität **hoch**. Unnötig lange OMOC-Buchungen haben die
+Priorität **niedrig**. Pro Auffälligkeit wird genau eine Zeile
 mit Datum, betroffenen Spielen, Halle und einer konkreten Erläuterung ausgegeben. Doppelte und
 umgekehrt eingetragene Mannschaftspaare erzeugen keine redundanten Ergebnisse.
 
@@ -144,11 +145,16 @@ Die Hallenbuchungsregel verarbeitet ausschließlich Buchungen mit
   Bewirtungsraum.
 - Hardtschule: Halle Ost, Mitte und West sowie die Küche als Bewirtungsraum.
 
-Für jedes Heimspiel muss jeder der vier Räume das vollständige Fenster vom
-30-Minuten-Vorlauf bis zum berechneten Spielende abdecken. Mehrere unmittelbar
-aneinander anschließende Buchungen dürfen das Fenster gemeinsam abdecken. Eine
-fehlende oder zeitlich zu kurze Buchung erzeugt genau einen Befund pro Spiel.
-Andere Sportstätten, Kostensätze, Namen und Veranstaltungstitel werden verworfen.
+Für jeden Heimspieltag muss jeder der vier Räume das vollständige Tagesfenster
+abdecken. Es beginnt 45 Minuten vor dem ersten Spiel für den Aufbau und endet
+45 Minuten nach dem berechneten Ende des letzten Spiels für den Abbau. Mehrere
+unmittelbar aneinander anschließende Buchungen dürfen das Fenster gemeinsam
+abdecken. Eine fehlende oder zeitlich zu kurze Buchung erzeugt genau einen Befund
+pro Halle und Tag. Eine mit dem Tagesfenster verbundene Buchung, die davor oder
+danach länger läuft, wird als nicht benötigte Buchungszeit separat ausgewiesen.
+Zeitlich getrennte Handball-Buchungen desselben Tages, beispielsweise für ein
+Training, gelten nicht als Überbuchung des Spieltags. Andere Sportstätten,
+Kostensätze, Namen und Veranstaltungstitel werden verworfen.
 
 OMOC-Zugangsdaten werden ausschließlich als Azure App Settings gespeichert:
 
