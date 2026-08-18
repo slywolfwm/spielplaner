@@ -63,3 +63,30 @@ def test_old_pair_without_priority_defaults_to_high():
     pair = PairStore(table).list_pairs("2026-27")[0]
 
     assert pair.priority == "Hoch"
+
+
+def test_replace_pairs_keeps_each_unordered_pair_once_and_deletes_removed():
+    store = PairStore(FakeTableClient())
+    store.save_pairs(
+        "2026-27",
+        [("Team A", "Team B", "Hoch"), ("Team C", "Team D", "Mittel")],
+        "old-user",
+    )
+
+    saved = store.replace_pairs(
+        "2026-27",
+        [
+            ("Team B", "Team A", "Niedrig"),
+            ("Team A", "Team B", "Hoch"),
+            ("Team A", "Team C", "Mittel"),
+        ],
+        "new-user",
+    )
+    pairs = store.list_pairs("2026-27")
+
+    assert saved == 2
+    assert [(pair.team_a, pair.team_b) for pair in pairs] == [
+        ("Team A", "Team B"),
+        ("Team A", "Team C"),
+    ]
+    assert pairs[0].priority == "Hoch"

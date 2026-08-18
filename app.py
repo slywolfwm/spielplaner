@@ -1,6 +1,10 @@
 import os
 from base64 import b64encode
+from hashlib import sha256
+from io import BytesIO
+from itertools import combinations
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -26,8 +30,9 @@ from analysis import (
     travel_leg_key,
 )
 from duration_store import DurationStore
-from pair_store import PairStore, StoredPair
+from pair_store import PairStore, StoredPair, pair_row_key
 from priorities import PRIORITY_LEVELS, normalize_priority
+from schedule_store import ScheduleStore, StoredSchedule
 from travel_times import GoogleRoutesClient, GoogleRoutesError
 
 
@@ -56,8 +61,9 @@ DURATION_HELP = (
     f"{PRE_GAME_BUFFER_MINUTES} Minuten Vorlauf berücksichtigt."
 )
 PAIR_HELP = (
-    "Lege Mannschaftspaare fest, deren Belegungszeiten sich nicht überschneiden "
-    "dürfen, und weise jedem Paar eine Priorität zu."
+    "Wähle in der Paarmatrix Mannschaften aus, deren Belegungszeiten sich nicht "
+    "überschneiden dürfen, und weise jedem Paar eine Priorität zu. Jede "
+    "ungeordnete Kombination wird genau einmal angeboten."
 )
 TRAVEL_HELP = (
     "Zeigt ausschließlich die gerichteten Hallenverbindungen, die für definierte "
@@ -403,6 +409,13 @@ def create_duration_store(connection_string: str, table_name: str) -> DurationSt
 
 
 @st.cache_resource(show_spinner=False)
+def create_schedule_store(
+    connection_string: str, container_name: str
+) -> ScheduleStore:
+    return ScheduleStore.from_connection_string(connection_string, container_name)
+
+
+@st.cache_resource(show_spinner=False)
 def create_google_routes_client(
     api_key: str, safety_percent: int, transfer_buffer_minutes: int
 ) -> GoogleRoutesClient:
@@ -477,10 +490,12 @@ def load_saved_pairs() -> tuple[PairStore | None, list[StoredPair], str]:
 def pairs_for_analysis(
     saved_pairs: list[StoredPair],
 ) -> tuple[list[tuple[Team, Team, str]], int]:
-    raw_pairs = list(st.session_state.get("manual_pairs", []))
-    raw_pairs.extend(
-        (pair.team_a, pair.team_b, pair.priority) for pair in saved_pairs
-    )
+    if "manual_pairs" in st.session_state:
+        raw_pairs = list(st.session_state["manual_pairs"])
+    else:
+        raw_pairs = [
+            (pair.team_a, pair.team_b, pair.priority) for pair in saved_pairs
+        ]
     result: list[tuple[Team, Team, str]] = []
     seen: set[tuple[str, str]] = set()
     skipped = 0
@@ -774,122 +789,115 @@ def show_duration_page() -> None:
 
 def show_pair_page() -> None:
     st.header("Mannschaftspaare", help=PAIR_HELP)
+    pair_store, stored_pairs, pair_error = load_saved_pairs()
+    if pair_error:
+        st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
 
-    pair_count = st.number_input(
-        "Anzahl der zu prüfenden Paare", min_value=1, max_value=20, value=1, step=1
-    )
-    pairs: list[tuple[str, str, str]] = []
-    for index in range(int(pair_count)):
-        col_a, col_b, col_priority = st.columns([1, 1, 0.62])
-        default_b = min(index + 1, max(len(labels) - 1, 0))
-        with col_a:
-            label_a = st.selectbox(
-                f"Paar {index + 1} · Mannschaft A",
-                labels,
-                key=f"team_a_{index}",
-            )
-        with col_b:
-            label_b = st.selectbox(
-                f"Paar {index + 1} · Mannschaft B",
-                labels,
-                index=default_b,
-                key=f"team_b_{index}",
-            )
-        with col_priority:
-            priority = st.selectbox(
-                f"Paar {index + 1} · Priorität",
-                PRIORITY_LEVELS,
-                key=f"pair_priority_{index}",
-            )
-        pairs.append((label_a, label_b, priority))
+    notice = st.session_state.pop("pairing_notice", "")
+    if notice:
+        st.success(notice)
 
-    st.session_state["manual_pairs"] = pairs
-    valid_manual_pairs = [pair for pair in pairs if pair[0] != pair[1]]
-    if len(valid_manual_pairs) != len(pairs):
-        st.warning("Paarungen einer Mannschaft mit sich selbst werden nicht geprüft.")
-    else:
-        st.success(
-            "Die aktuelle Auswahl wird bei der nächsten Spielplanprüfung verwendet."
+    stored_by_key = {
+        pair_row_key(pair.team_a, pair.team_b): pair for pair in stored_pairs
+    }
+    manual_pairs = st.session_state.get("manual_pairs")
+    active_pairs = manual_pairs if manual_pairs is not None else [
+        (pair.team_a, pair.team_b, pair.priority) for pair in stored_pairs
+    ]
+    active_by_key = {
+        pair_row_key(pair[0], pair[1]): normalize_priority(
+            pair[2] if len(pair) == 3 else None
+        )
+        for pair in active_pairs
+        if pair[0] != pair[1]
+    }
+
+    rows = []
+    for label_a, label_b in combinations(labels, 2):
+        row_key = pair_row_key(label_a, label_b)
+        rows.append(
+            {
+                "PaarKey": row_key,
+                "TeamA": label_a,
+                "TeamB": label_b,
+                "Auswählen": row_key in active_by_key,
+                "Mannschaft A": concise_team_label(label_a),
+                "Mannschaft B": concise_team_label(label_b),
+                "Priorität": active_by_key.get(
+                    row_key,
+                    stored_by_key.get(row_key).priority
+                    if row_key in stored_by_key
+                    else PRIORITY_LEVELS[0],
+                ),
+            }
         )
 
-    with st.expander("Gespeicherte Paarungen", expanded=access.can_view_pairings):
-        if not access.authenticated:
-            st.info("Melde dich an, um freigegebene Paarungen zu sehen.")
-            show_login_action("pairing_login")
-        elif not access.can_view_pairings:
-            st.warning(
-                "Deinem Benutzer wurde kein Zugriff auf gespeicherte Paarungen "
-                "zugewiesen."
-            )
-        elif not connection_string:
-            st.warning("Azure Table Storage ist noch nicht für die App konfiguriert.")
-        else:
-            pair_store, stored_pairs, pair_error = load_saved_pairs()
-            if pair_error:
-                st.error(
-                    "Gespeicherte Paarungen konnten nicht geladen werden: "
-                    f"{pair_error}"
-                )
-            else:
-                notice = st.session_state.pop("pairing_notice", "")
-                if notice:
-                    st.success(notice)
+    matrix = st.data_editor(
+        pd.DataFrame(rows),
+        hide_index=True,
+        width="stretch",
+        height=520,
+        disabled=["Mannschaft A", "Mannschaft B"],
+        column_config={
+            "PaarKey": None,
+            "TeamA": None,
+            "TeamB": None,
+            "Auswählen": st.column_config.CheckboxColumn(width="small"),
+            "Mannschaft A": st.column_config.TextColumn(width="medium"),
+            "Mannschaft B": st.column_config.TextColumn(width="medium"),
+            "Priorität": st.column_config.SelectboxColumn(
+                options=PRIORITY_LEVELS,
+                required=True,
+                width="small",
+            ),
+        },
+        key="pair_matrix_editor",
+    )
 
-                if stored_pairs:
-                    st.dataframe(
-                        pd.DataFrame(
-                            [
-                                {
-                                    "Mannschaft A": pair.team_a,
-                                    "Mannschaft B": pair.team_b,
-                                    "Priorität": pair.priority,
-                                }
-                                for pair in stored_pairs
-                            ]
-                        ),
-                        hide_index=True,
-                        width="stretch",
-                    )
-                    stored_by_key = {pair.row_key: pair for pair in stored_pairs}
-                else:
-                    st.info("Es wurden noch keine Paarungen gespeichert.")
+    selected_by_key: dict[str, tuple[str, str, str]] = {}
+    for _, row in matrix.loc[matrix["Auswählen"]].iterrows():
+        row_key = str(row["PaarKey"])
+        selected_by_key[row_key] = (
+            str(row["TeamA"]),
+            str(row["TeamB"]),
+            normalize_priority(row["Priorität"]),
+        )
+    selected_pairs = list(selected_by_key.values())
+    st.session_state["manual_pairs"] = selected_pairs
+    st.caption(
+        f"{len(selected_pairs)} Paarung(en) ausgewählt · jede Kombination wird "
+        "genau einmal geführt."
+    )
 
-                if access.can_edit_pairings:
-                    st.divider()
-                    if st.button("Aktuelle Auswahl speichern", width="stretch"):
-                        if not valid_manual_pairs:
-                            st.warning(
-                                "Wähle mindestens zwei unterschiedliche "
-                                "Mannschaften aus."
-                            )
-                        else:
-                            saved = pair_store.save_pairs(
-                                SEASON,
-                                valid_manual_pairs,
-                                access.object_id or access.display_name,
-                            )
-                            st.session_state["pairing_notice"] = (
-                                f"{saved} Paarung(en) wurden gespeichert."
-                            )
-                            st.rerun()
+    if not access.can_edit_pairings:
+        st.caption("Die Auswahl gilt für diese Sitzung und ist nicht dauerhaft.")
+        return
+    if pair_store is None:
+        st.warning("Azure Table Storage ist noch nicht für die App konfiguriert.")
+        return
 
-                    if stored_pairs:
-                        delete_keys = st.multiselect(
-                            "Zu löschende Paarungen",
-                            options=list(stored_by_key),
-                            format_func=lambda key: stored_by_key[key].label,
-                        )
-                        if st.button(
-                            "Ausgewählte gespeicherte Paarungen löschen",
-                            disabled=not delete_keys,
-                            width="stretch",
-                        ):
-                            for row_key in delete_keys:
-                                pair_store.delete_pair(SEASON, row_key)
-                            st.session_state["pairing_notice"] = (
-                                f"{len(delete_keys)} Paarung(en) wurden gelöscht."
-                            )
-                            st.rerun()
+    removed_keys = set(stored_by_key).difference(selected_by_key)
+    deletion_confirmed = True
+    if removed_keys:
+        deletion_confirmed = st.checkbox(
+            f"Das Entfernen von {len(removed_keys)} gespeicherten Paarung(en) "
+            "bestätigen"
+        )
+    if st.button(
+        "Paarmatrix dauerhaft speichern",
+        type="primary",
+        disabled=not deletion_confirmed,
+        width="stretch",
+    ):
+        saved = pair_store.replace_pairs(
+            SEASON,
+            selected_pairs,
+            access.object_id or access.display_name,
+        )
+        st.session_state["pairing_notice"] = (
+            f"Die Paarmatrix mit {saved} Paarung(en) wurde gespeichert."
+        )
+        st.rerun()
 
 
 def show_travel_page() -> None:
@@ -956,11 +964,12 @@ def show_guide_page() -> None:
 
     st.subheader("1. Mannschaftspaare festlegen")
     st.markdown(
-        "Wähle zwei Mannschaften aus, deren Belegungszeiten sich nicht "
-        "überschneiden dürfen. Für jedes Paar kann die Priorität **Hoch**, "
-        "**Mittel** oder **Niedrig** festgelegt werden. Manuelle Paarungen gelten "
-        "für die aktuelle Sitzung; berechtigte Benutzer können sie dauerhaft "
-        "speichern."
+        "Markiere in der Paarmatrix alle Mannschaftskombinationen, deren "
+        "Belegungszeiten sich nicht überschneiden dürfen. Jede Kombination "
+        "erscheint unabhängig von ihrer Richtung genau einmal. Für jedes Paar "
+        "kann die Priorität **Hoch**, **Mittel** oder **Niedrig** festgelegt "
+        "werden. Berechtigte Benutzer können die vollständige Matrix dauerhaft "
+        "in Azure speichern."
     )
 
     st.subheader("2. Spieldauern prüfen")
@@ -1024,6 +1033,20 @@ tenant_id = configured_value(
 )
 access, using_oidc = current_user_access(tenant_id)
 require_tenant_access(tenant_id)
+connection_string = configured_value("AZURE_STORAGE_CONNECTION_STRING")
+schedule_store = None
+persisted_schedule: StoredSchedule | None = None
+schedule_storage_error = ""
+if connection_string:
+    try:
+        schedule_store = create_schedule_store(
+            connection_string,
+            configured_value("AZURE_SCHEDULE_CONTAINER_NAME", "schedules"),
+        )
+        persisted_schedule = schedule_store.latest_schedule(SEASON)
+    except Exception as exc:
+        schedule_storage_error = str(exc)
+
 page = st.navigation(
     [
         st.Page(
@@ -1067,12 +1090,31 @@ with st.sidebar:
 
 show_brand_header()
 uploaded = st.file_uploader(
-    "Optional: aktualisierten nuLiga-Gesamtspielplan laden", type="csv"
+    "Aktualisierten nuLiga-Gesamtspielplan dauerhaft laden",
+    type="csv",
+    disabled=not access.can_edit_pairings or schedule_store is None,
 )
-source = uploaded if uploaded is not None else DEFAULT_CSV
 
 try:
-    schedule_parts = [load_schedule(source)]
+    active_schedule = persisted_schedule
+    if uploaded is not None:
+        uploaded_content = uploaded.getvalue()
+        main_schedule = load_schedule(BytesIO(uploaded_content))
+        upload_digest = sha256(uploaded_content).hexdigest()
+        if st.session_state.get("persisted_schedule_digest") != upload_digest:
+            active_schedule = schedule_store.save_schedule(
+                SEASON,
+                uploaded.name,
+                uploaded_content,
+                access.object_id or access.display_name,
+            )
+            st.session_state["persisted_schedule_digest"] = upload_digest
+    elif active_schedule is not None:
+        main_schedule = load_schedule(BytesIO(active_schedule.content))
+    else:
+        main_schedule = load_schedule(DEFAULT_CSV)
+
+    schedule_parts = [main_schedule]
     if DEFAULT_DISTRICT_CSV.exists():
         schedule_parts.append(load_schedule(DEFAULT_DISTRICT_CSV))
     schedule = pd.concat(schedule_parts, ignore_index=True).drop_duplicates(
@@ -1089,11 +1131,28 @@ except Exception as exc:
     st.error(f"Der Spielplan konnte nicht geladen werden: {exc}")
     st.stop()
 
+if schedule_storage_error:
+    st.warning(
+        "Der persistente Spielplanspeicher ist derzeit nicht erreichbar. "
+        "Es wird der mitgelieferte Spielplan verwendet."
+    )
+elif active_schedule is not None:
+    uploaded_at = pd.Timestamp(active_schedule.uploaded_at).tz_convert(
+        ZoneInfo("Europe/Berlin")
+    )
+    st.caption(
+        f"Aktiver Spielplan: {active_schedule.original_name} · hochgeladen am "
+        f"{uploaded_at:%d.%m.%Y um %H:%M Uhr}"
+    )
+elif schedule_store is None:
+    st.warning("Azure Blob Storage ist noch nicht für Spielplan-Uploads verfügbar.")
+else:
+    st.caption("Aktiver Spielplan: mitgelieferter Saisonstand")
+
 teams = available_teams(schedule)
 team_by_label = {team.label: team for team in teams}
 team_by_key = {team.key: team for team in teams}
 labels = list(team_by_label)
-connection_string = configured_value("AZURE_STORAGE_CONNECTION_STRING")
 duration_store = None
 stored_durations = {}
 duration_storage_error = ""

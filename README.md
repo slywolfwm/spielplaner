@@ -17,7 +17,8 @@ Die Navigation teilt die App in fünf Seiten auf:
   und gibt eine priorisierte, kommentierte Ergebnistabelle aus.
 - **Spieldauern** verwaltet Regeldauer und Unterbrechungspuffer je Mannschaft.
 - **Mannschaftspaare** legt die Teams fest, die sich nicht überschneiden dürfen,
-  und weist jedem Paar eine Priorität zu.
+  und weist jedem Paar eine Priorität zu. Jede ungeordnete Kombination erscheint
+  in der Auswahlmatrix genau einmal.
 - **Fahrzeiten** zeigt die aus diesen Paaren abgeleitete, relevante Teilmatrix der
   Hallenverbindungen.
 - **Anleitung** bündelt die Erläuterungen zur Bedienung und zu den Prüfregeln.
@@ -42,7 +43,9 @@ Wert ist eine konservative Planungsannahme, keine vom Verband festgelegte
 Bruttospieldauer. Vor jedem Anwurf berücksichtigt die App außerdem einen festen
 Vorlauf von 30 Minuten. Über
 den CSV-Upload kann später ein aktualisierter nuLiga-Gesamtspielplan eingelesen
-werden.
+werden. Berechtigte Benutzer speichern einen Upload automatisch versioniert in
+Azure Blob Storage. Beim nächsten Start verwendet die App die zuletzt
+hochgeladene gültige Datei und zeigt deren Upload-Zeitpunkt an.
 
 Der mitgelieferte Vereinsspielplan ergänzt den Regionsspielplan um die bereits
 veröffentlichten Begegnungen der Herren, Damen sowie mD-/wD-Jugend aus dem Bezirk
@@ -138,13 +141,17 @@ Microsoft-Entra-App-Rollen den Zugriff auf dauerhaft gespeicherte Einstellungen:
 - `Pairings.Editor`: zusätzlich Paarungen speichern und löschen sowie
   Spieldauern dauerhaft ändern
 
-Paarungen und Spieldauern werden in Azure Table Storage gespeichert. Dafür
-benötigt der Azure App Service folgende Umgebungsvariablen:
+Paarungen und Spieldauern werden in Azure Table Storage gespeichert. Hochgeladene
+Spielpläne werden als versionierte CSV-Dateien in einem privaten Azure-Blob-
+Container abgelegt. Dafür benötigt der Azure App Service folgende
+Umgebungsvariablen:
 
 - `AZURE_STORAGE_CONNECTION_STRING`: Verbindungszeichenfolge des Storage Accounts
 - `AZURE_TABLE_NAME`: optionaler Tabellenname, Standard ist `teampairs`
 - `AZURE_DURATION_TABLE_NAME`: optionaler Tabellenname für Spieldauern, Standard
   ist `teamdurations`
+- `AZURE_SCHEDULE_CONTAINER_NAME`: optionaler Blob-Container für versionierte
+  Spielplan-Uploads, Standard ist `schedules`
 - `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden
   dürfen
 - `GOOGLE_MAPS_API_KEY`: serverseitiger, auf die Routes API eingeschränkter

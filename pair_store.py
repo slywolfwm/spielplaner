@@ -87,6 +87,28 @@ class PairStore:
     def delete_pair(self, season: str, row_key: str) -> None:
         self.table_client.delete_entity(partition_key=season, row_key=row_key)
 
+    def replace_pairs(
+        self,
+        season: str,
+        pairs: Iterable[tuple[str, str] | tuple[str, str, str]],
+        created_by: str,
+    ) -> int:
+        normalized: dict[str, tuple[str, str, str]] = {}
+        for pair in pairs:
+            team_a, team_b = normalize_pair(pair[0], pair[1])
+            priority = normalize_priority(pair[2] if len(pair) == 3 else None)
+            normalized[pair_row_key(team_a, team_b)] = (
+                team_a,
+                team_b,
+                priority,
+            )
+
+        self.save_pairs(season, normalized.values(), created_by)
+        existing_keys = {pair.row_key for pair in self.list_pairs(season)}
+        for row_key in existing_keys.difference(normalized):
+            self.delete_pair(season, row_key)
+        return len(normalized)
+
 
 def normalize_pair(team_a: str, team_b: str) -> tuple[str, str]:
     if team_a == team_b:
