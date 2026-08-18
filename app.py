@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, JsCode
 
 from access_control import (
     UserAccess,
@@ -51,6 +52,7 @@ MAX_RELEVANT_TRAVEL_GAP_MINUTES = 480
 DEFAULT_TRAVEL_SAFETY_PERCENT = 15
 DEFAULT_TRAVEL_TRANSFER_BUFFER_MINUTES = 10
 DEFAULT_MAX_AZURE_MAPS_REQUESTS_PER_RUN = 100
+ACTIVE_RULE_COUNT = 5
 DEFAULT_MICROSOFT_TENANT_ID = "c0cba668-b196-49f4-b4e8-36af0e1cc1bd"
 BRAND_LOGO = APP_DIR / "static" / "tsv-handball.webp"
 BRAND_FONT_MEDIUM = APP_DIR / "static" / "eras-medium.ttf"
@@ -162,6 +164,12 @@ def asset_data_uri(path: Path, media_type: str) -> str:
 def concise_team_label(label: str) -> str:
     name, separator, suffix = label.rpartition(" (")
     return name if separator and suffix.endswith(")") else label
+
+
+def show_page_metrics(items: list[tuple[str, object]]) -> None:
+    columns = st.columns(len(items))
+    for column, (label, value) in zip(columns, items):
+        column.metric(label, value)
 
 
 def apply_brand_theme() -> None:
@@ -280,29 +288,30 @@ def apply_brand_theme() -> None:
         }
 
         .spielplaner-masthead {
-            margin: 0 0 2rem;
-            padding: 1rem 1.15rem;
-            background: var(--brand-surface);
-            border: 1px solid var(--brand-line);
-            border-left: 0.38rem solid var(--brand-red);
-            border-radius: var(--brand-card-radius);
-            box-shadow: var(--brand-shadow);
+            display: flex;
+            align-items: baseline;
+            gap: 0.9rem;
+            margin: 0 0 1.5rem;
+            padding: 0.1rem 0 0.8rem;
+            border-bottom: 1px solid var(--brand-line);
         }
 
         .spielplaner-masthead__club {
-            margin: 0 0 0.1rem;
+            order: 2;
+            margin: 0;
+            padding-left: 0.9rem;
             color: var(--brand-blue);
+            border-left: 0.2rem solid var(--brand-red);
             font-family: var(--brand-font) !important;
-            font-size: 0.82rem;
-            font-weight: 800;
-            letter-spacing: 0.045em;
-            text-transform: uppercase;
+            font-size: 0.92rem;
+            font-weight: 700;
         }
 
         .spielplaner-masthead h1 {
             margin: 0;
-            font-size: clamp(2rem, 4vw, 3.2rem);
-            line-height: 1;
+            color: var(--brand-blue) !important;
+            font-size: clamp(1.7rem, 3vw, 2.25rem);
+            line-height: 1.1;
         }
 
         .stButton > button,
@@ -383,9 +392,16 @@ def apply_brand_theme() -> None:
             }
 
             .spielplaner-masthead {
-                padding: 0.85rem;
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 0.35rem;
             }
 
+            .spielplaner-masthead__club {
+                order: 2;
+                padding-left: 0;
+                border-left: 0;
+            }
         }
         </style>
         """,
@@ -716,6 +732,13 @@ def show_analysis_page() -> None:
             "Manuell festgelegte Paare werden weiterhin geprüft."
         )
     analysis_pairs, skipped_pairs = pairs_for_analysis(saved_pairs)
+    show_page_metrics(
+        [
+            ("Spiele im Plan", len(schedule)),
+            ("Aktive Regeln", ACTIVE_RULE_COUNT),
+            ("Mannschaftspaare", len(analysis_pairs)),
+        ]
+    )
     if not analysis_pairs:
         st.info(
             "Es ist noch kein gültiges Mannschaftspaar definiert. Die Pufferregel "
@@ -791,6 +814,13 @@ def show_analysis_page() -> None:
 
 def show_duration_page() -> None:
     st.header("Spieldauern", help=DURATION_HELP)
+    show_page_metrics(
+        [
+            ("Mannschaften", len(teams)),
+            ("Dauerprofile", len(duration_settings)),
+            ("Vorlauf je Spiel", f"{PRE_GAME_BUFFER_MINUTES} Min."),
+        ]
+    )
 
     duration_notice = st.session_state.pop("duration_notice", "")
     if duration_notice:
@@ -878,6 +908,7 @@ def show_duration_page() -> None:
 
 def show_pair_page() -> None:
     st.header("Mannschaftspaare", help=PAIR_HELP)
+    metrics = st.container()
     pair_store, stored_pairs, pair_error = load_saved_pairs()
     if pair_error:
         st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
@@ -902,32 +933,113 @@ def show_pair_page() -> None:
     }
 
     matrix_source, column_teams = build_pair_matrix(labels, active_by_key)
-    matrix_columns = {
-        "Mannschaft": st.column_config.TextColumn(
-            width="medium",
-            disabled=True,
-            pinned=True,
-        )
-    }
-    matrix_columns.update(
-        {
-            heading: st.column_config.SelectboxColumn(
-                label=heading,
-                help=concise_team_label(team_label),
-                options=("", *PRIORITY_LEVELS),
-                width="small",
-            )
-            for heading, team_label in column_teams.items()
+    matrix_source.insert(0, "_row_index", range(len(matrix_source)))
+    editable_cell = JsCode(
+        """
+        function(params) {
+            return params.data._row_index < params.colDef.matrixIndex;
         }
+        """
     )
-    matrix = st.data_editor(
+    priority_cell_style = JsCode(
+        """
+        function(params) {
+            if (params.data._row_index >= params.colDef.matrixIndex) {
+                return {
+                    backgroundColor: '#e5e7eb',
+                    color: '#e5e7eb',
+                    cursor: 'not-allowed'
+                };
+            }
+            if (params.value === 'Hoch') {
+                return {backgroundColor: '#ffc9c9', color: '#8f111c'};
+            }
+            if (params.value === 'Mittel') {
+                return {backgroundColor: '#ffd8a8', color: '#7a3d00'};
+            }
+            if (params.value === 'Niedrig') {
+                return {backgroundColor: '#fff3bf', color: '#5f4b00'};
+            }
+            return {backgroundColor: '#f1f3f5', color: '#667085'};
+        }
+        """
+    )
+    column_defs = [
+        {
+            "field": "_row_index",
+            "hide": True,
+        },
+        {
+            "field": "Mannschaft",
+            "headerName": "Mannschaft",
+            "pinned": "left",
+            "lockPinned": True,
+            "editable": False,
+            "width": 190,
+            "minWidth": 160,
+            "cellStyle": {
+                "fontWeight": "700",
+                "backgroundColor": "#ffffff",
+                "color": "#1f2937",
+            },
+        },
+    ]
+    column_defs.extend(
+        {
+            "field": heading,
+            "headerName": heading,
+            "headerTooltip": concise_team_label(team_label),
+            "matrixIndex": column_index,
+            "editable": editable_cell,
+            "cellEditor": "agSelectCellEditor",
+            "cellEditorParams": {"values": ["", *PRIORITY_LEVELS]},
+            "cellStyle": priority_cell_style,
+            "width": 105,
+            "minWidth": 90,
+        }
+        for column_index, (heading, team_label) in enumerate(column_teams.items())
+    )
+    grid_response = AgGrid(
         matrix_source,
-        hide_index=True,
-        width="stretch",
+        gridOptions={
+            "columnDefs": column_defs,
+            "defaultColDef": {
+                "sortable": False,
+                "filter": False,
+                "resizable": True,
+                "suppressMovable": True,
+            },
+            "rowHeight": 38,
+            "headerHeight": 42,
+            "alwaysShowHorizontalScroll": True,
+            "suppressColumnVirtualisation": True,
+            "stopEditingWhenCellsLoseFocus": True,
+        },
         height=520,
-        disabled=["Mannschaft"],
-        column_config=matrix_columns,
+        theme="streamlit",
+        allow_unsafe_jscode=True,
+        enable_enterprise_modules=False,
+        update_on=["cellValueChanged"],
+        custom_css={
+            ".ag-root-wrapper": {
+                "border": "1px solid #e5e7eb",
+                "border-radius": "0.85rem",
+                "overflow": "hidden",
+            },
+            ".ag-header-cell-label": {
+                "font-family": "Eras Web, Trebuchet MS, sans-serif",
+                "font-weight": "700",
+            },
+            ".ag-cell": {
+                "font-family": "Eras Web, Trebuchet MS, sans-serif",
+                "display": "flex",
+                "align-items": "center",
+            },
+        },
         key="pair_matrix_editor",
+    )
+    matrix = pd.DataFrame(grid_response.data).drop(
+        columns="_row_index", errors="ignore"
     )
     selected_pairs = selected_pairs_from_matrix(matrix, labels, column_teams)
     selected_by_key = {
@@ -935,9 +1047,17 @@ def show_pair_page() -> None:
         for team_a, team_b, priority in selected_pairs
     }
     st.session_state["manual_pairs"] = selected_pairs
+    with metrics:
+        show_page_metrics(
+            [
+                ("Ausgewählt", len(selected_pairs)),
+                ("Gespeichert", len(stored_pairs)),
+                ("Mögliche Paare", len(labels) * (len(labels) - 1) // 2),
+            ]
+        )
     st.caption(
         f"{len(selected_pairs)} Paarung(en) ausgewählt. Eine leere Zelle bedeutet "
-        "keine Prüfung. Nur die obere Hälfte der Matrix wird ausgewertet."
+        "keine Prüfung. Die graue untere Hälfte ist gesperrt."
     )
 
     if not access.can_edit_pairings:
@@ -979,6 +1099,18 @@ def show_travel_page() -> None:
         st.warning("Gespeicherte Mannschaftspaare konnten nicht geladen werden.")
     analysis_pairs, _ = pairs_for_analysis(saved_pairs)
     legs = relevant_travel_legs(analysis_pairs)
+    route_count = (
+        len(legs[["Startschlüssel", "Zielschlüssel"]].drop_duplicates())
+        if not legs.empty
+        else 0
+    )
+    show_page_metrics(
+        [
+            ("Relevante Abfolgen", len(legs)),
+            ("Hallenverbindungen", route_count),
+            ("Maximale Lücke", f"{MAX_RELEVANT_TRAVEL_GAP_MINUTES // 60} Std."),
+        ]
+    )
 
     if legs.empty:
         st.info("Für die aktuellen Mannschaftspaare ist keine Fahrstrecke relevant.")
@@ -1026,6 +1158,13 @@ def show_travel_page() -> None:
 
 def show_guide_page() -> None:
     st.header("Anleitung")
+    show_page_metrics(
+        [
+            ("Mannschaften", len(teams)),
+            ("Aktive Regeln", ACTIVE_RULE_COUNT),
+            ("OMOC-Hallen", len(HALL_BOOKING_REQUIREMENTS)),
+        ]
+    )
     st.markdown(
         "Der Spielplaner kontrolliert die Spiele des TSV Weilheim und der "
         "weiblichen A-Jugend des BSC Oberhausen in der Saison 2026/27. Ein "
@@ -1182,11 +1321,13 @@ with st.sidebar:
         st.button("Abmelden", key="sidebar_logout", on_click=st.logout)
 
 show_brand_header()
-uploaded = st.file_uploader(
-    "Aktualisierten nuLiga-Gesamtspielplan dauerhaft laden",
-    type="csv",
-    disabled=not access.can_edit_pairings or schedule_store is None,
-)
+uploaded = None
+if page.title == "Spielplanprüfung":
+    uploaded = st.file_uploader(
+        "Aktualisierten nuLiga-Gesamtspielplan dauerhaft laden",
+        type="csv",
+        disabled=not access.can_edit_pairings or schedule_store is None,
+    )
 
 try:
     active_schedule = persisted_schedule
