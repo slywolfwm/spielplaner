@@ -18,6 +18,8 @@ from access_control import (
 from analysis import (
     HALL_BOOKING_DISPLAY_NAMES,
     HALL_BOOKING_REQUIREMENTS,
+    MANUAL_HALL_NUMBERS,
+    OMOC_HALL_NUMBERS,
     RULE_HOME_BUFFER,
     RULE_HALL_BOOKING,
     RULE_HALL_BOOKING_EXCESS,
@@ -35,9 +37,11 @@ from analysis import (
     load_schedule,
     travel_leg_key,
 )
+from booking_calendar import is_visible_booking_day
 from duration_store import DurationStore
 from hall_booking_store import HallBookingStore, StoredHallBookings
-from omoc import OmocClient
+from manual_hall_bookings import bookings_from_editor
+from omoc import BOOKING_COLUMNS, OmocClient
 from pair_matrix import (
     TEAM_CATEGORY_ORDER,
     build_pair_matrix,
@@ -91,9 +95,9 @@ TRAVEL_HELP = (
     "Puffer für Parkplatz und Hallenweg."
 )
 HALL_BOOKING_HELP = (
-    "Zeigt den zuletzt aus OMOC übernommenen Buchungsstand für Jahnhalle und "
-    "Hardtschule. Berechtigte Benutzer können die Grunddaten für den im "
-    "Spielplan benötigten Zeitraum aktualisieren."
+    "Zeigt OMOC-Buchungen für Jahnhalle und Hardtschule sowie manuelle "
+    "Buchungen für weitere Spielhallen. Berechtigte Benutzer können beide "
+    "Datenbestände für den benötigten Saisonzeitraum aktualisieren."
 )
 
 
@@ -276,8 +280,19 @@ def apply_brand_theme() -> None:
             border-radius: var(--brand-button-radius);
             color: var(--brand-heading);
             font-family: var(--brand-font) !important;
-            font-weight: 700;
+            font-weight: 700 !important;
             padding: 0.55rem 0.8rem;
+            transition: background-color 140ms ease, color 140ms ease;
+        }
+
+        [data-testid="stSidebarNav"] a p,
+        [data-testid="stSidebarNav"] a:hover,
+        [data-testid="stSidebarNav"] a:hover p {
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stSidebarNav"] a:hover {
+            background: rgba(224, 10, 29, 0.08);
         }
 
         [data-testid="stSidebarNav"] a[aria-current="page"] {
@@ -731,12 +746,19 @@ def show_azure_maps_attribution() -> None:
     )
 
 
-def relevant_hall_booking_period() -> tuple[date, date] | None:
-    blocks = home_game_blocks(
+def relevant_hall_booking_blocks() -> pd.DataFrame:
+    return home_game_blocks(
         schedule, teams, current_duration_map(), PRE_GAME_BUFFER_MINUTES
     )
+
+
+def relevant_hall_booking_period(
+    hall_numbers: set[str] | frozenset[str] | None = None,
+) -> tuple[date, date] | None:
+    blocks = relevant_hall_booking_blocks()
+    targets = hall_numbers or frozenset(HALL_BOOKING_REQUIREMENTS)
     relevant = blocks[
-        blocks["Hallennummer"].astype(str).isin(HALL_BOOKING_REQUIREMENTS)
+        blocks["Hallennummer"].astype(str).isin(targets)
     ]
     if relevant.empty:
         return None
@@ -744,28 +766,34 @@ def relevant_hall_booking_period() -> tuple[date, date] | None:
 
 
 def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
-    period = relevant_hall_booking_period()
-    if period is None:
-        return pd.DataFrame(), ""
     if hall_booking_storage_error:
         return None, "Der gespeicherte OMOC-Buchungsstand ist nicht erreichbar."
-    if stored_hall_bookings is None:
-        return (
-            None,
-            "Noch keine Hallenbuchungen gespeichert. Bitte auf der Seite "
-            "Hallenbuchungen aktualisieren.",
-        )
-    date_from, date_to = period
-    if (
-        stored_hall_bookings.date_from > date_from
-        or stored_hall_bookings.date_to < date_to
-    ):
-        return (
-            None,
-            "Der gespeicherte OMOC-Buchungsstand deckt den aktuellen Spielplan "
-            "nicht vollständig ab. Bitte Hallenbuchungen aktualisieren.",
-        )
-    return stored_hall_bookings.bookings.copy(), ""
+    frames = []
+    omoc_period = relevant_hall_booking_period(OMOC_HALL_NUMBERS)
+    if omoc_period is not None:
+        if stored_hall_bookings is None:
+            return (
+                None,
+                "Noch keine Hallenbuchungen gespeichert. Bitte auf der Seite "
+                "Hallenbuchungen aktualisieren.",
+            )
+        date_from, date_to = omoc_period
+        if (
+            stored_hall_bookings.date_from > date_from
+            or stored_hall_bookings.date_to < date_to
+        ):
+            return (
+                None,
+                "Der gespeicherte OMOC-Buchungsstand deckt den aktuellen "
+                "Spielplan nicht vollständig ab. Bitte Hallenbuchungen "
+                "aktualisieren.",
+            )
+        frames.append(stored_hall_bookings.bookings)
+    if stored_manual_hall_bookings is not None:
+        frames.append(stored_manual_hall_bookings.bookings)
+    if not frames:
+        return pd.DataFrame(columns=BOOKING_COLUMNS), ""
+    return pd.concat(frames, ignore_index=True), ""
 
 
 def show_analysis_page() -> None:
@@ -1238,11 +1266,44 @@ def show_travel_page() -> None:
         )
 
 
-def hall_booking_display(bookings: pd.DataFrame) -> pd.DataFrame:
-    room_details = {
-        room_id: (HALL_BOOKING_DISPLAY_NAMES[hall_id], room_name)
+def hall_booking_room_details() -> dict[str, tuple[str, str, str]]:
+    return {
+        room_id: (hall_id, HALL_BOOKING_DISPLAY_NAMES[hall_id], room_name)
         for hall_id, rooms in HALL_BOOKING_REQUIREMENTS.items()
         for room_id, room_name in rooms
+    }
+
+
+def hall_booking_game_days() -> set[tuple[date, str]]:
+    return {
+        (row["Datum"], str(row["Hallennummer"]))
+        for row in relevant_hall_booking_blocks().to_dict("records")
+        if str(row["Hallennummer"]) in HALL_BOOKING_REQUIREMENTS
+    }
+
+
+def visible_hall_bookings(bookings: pd.DataFrame) -> pd.DataFrame:
+    room_details = hall_booking_room_details()
+    game_days = hall_booking_game_days()
+    visible_indices = []
+    for index, booking in bookings.iterrows():
+        day = pd.Timestamp(booking["Buchungsbeginn"]).date()
+        hall_numbers = {
+            room_details[room_id][0]
+            for room_id in booking["Raum-IDs"]
+            if room_id in room_details
+        }
+        if any(
+            is_visible_booking_day(day, hall_number, game_days)
+            for hall_number in hall_numbers
+        ):
+            visible_indices.append(index)
+    return bookings.loc[visible_indices].copy()
+
+
+def hall_booking_display(bookings: pd.DataFrame, source: str) -> pd.DataFrame:
+    room_details = {
+        room_id: details[1:] for room_id, details in hall_booking_room_details().items()
     }
     room_order = {room_id: index for index, room_id in enumerate(room_details)}
     rows = []
@@ -1266,6 +1327,7 @@ def hall_booking_display(bookings: pd.DataFrame) -> pd.DataFrame:
         ends_at = pd.Timestamp(booking["Buchungsende"])
         rows.append(
             {
+                "Quelle": source,
                 "Buchungsnummer": booking["Buchungsnummer"],
                 "Datum": starts_at.date(),
                 "Von": starts_at.time(),
@@ -1277,6 +1339,7 @@ def hall_booking_display(bookings: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         rows,
         columns=[
+            "Quelle",
             "Buchungsnummer",
             "Datum",
             "Von",
@@ -1284,6 +1347,54 @@ def hall_booking_display(bookings: pd.DataFrame) -> pd.DataFrame:
             "Sportstätte",
             "Gebuchte Bereiche",
         ],
+    )
+
+
+def manual_hall_editor_frame(bookings: pd.DataFrame) -> pd.DataFrame:
+    room_details = hall_booking_room_details()
+    rows = []
+    for booking in bookings.sort_values("Buchungsbeginn").to_dict("records"):
+        manual_rooms = [
+            room_id
+            for room_id in booking["Raum-IDs"]
+            if room_id in room_details
+            and room_details[room_id][0] in MANUAL_HALL_NUMBERS
+        ]
+        if not manual_rooms:
+            continue
+        starts_at = pd.Timestamp(booking["Buchungsbeginn"])
+        ends_at = pd.Timestamp(booking["Buchungsende"])
+        rows.append(
+            {
+                "Sportstätte": room_details[manual_rooms[0]][1],
+                "Datum": starts_at.date(),
+                "Von": starts_at.time(),
+                "Bis": ends_at.time(),
+            }
+        )
+    return pd.DataFrame(rows, columns=["Sportstätte", "Datum", "Von", "Bis"])
+
+
+def manual_bookings_from_editor(
+    editor: pd.DataFrame,
+    date_from: date,
+    date_to: date,
+) -> pd.DataFrame:
+    hall_by_name = {
+        HALL_BOOKING_DISPLAY_NAMES[hall_number]: hall_number
+        for hall_number in MANUAL_HALL_NUMBERS
+    }
+    room_id_by_hall = {
+        hall_number: HALL_BOOKING_REQUIREMENTS[hall_number][0][0]
+        for hall_number in MANUAL_HALL_NUMBERS
+    }
+    return bookings_from_editor(
+        editor,
+        hall_by_name,
+        room_id_by_hall,
+        date_from,
+        date_to,
+        hall_booking_game_days(),
     )
 
 
@@ -1301,6 +1412,7 @@ def show_hall_booking_page() -> None:
         return
 
     date_from, date_to = period
+    omoc_period = relevant_hall_booking_period(OMOC_HALL_NUMBERS)
     if stored_hall_bookings is None:
         st.info("Es wurde noch kein Buchungsstand aus OMOC gespeichert.")
     else:
@@ -1322,6 +1434,7 @@ def show_hall_booking_page() -> None:
         access.can_edit_pairings
         and hall_booking_store is not None
         and omoc_client is not None
+        and omoc_period is not None
     )
     if st.button(
         "Hallenbuchungen aus OMOC aktualisieren",
@@ -1329,13 +1442,16 @@ def show_hall_booking_page() -> None:
         disabled=not can_refresh,
     ):
         try:
+            omoc_date_from, omoc_date_to = omoc_period
             with st.spinner("Hallenbuchungen werden aus OMOC geladen …"):
-                bookings = omoc_client.fetch_bookings(date_from, date_to)
+                bookings = omoc_client.fetch_bookings(
+                    omoc_date_from, omoc_date_to
+                )
                 hall_booking_store.save_bookings(
                     SEASON,
                     bookings,
-                    date_from,
-                    date_to,
+                    omoc_date_from,
+                    omoc_date_to,
                     access.display_name or access.object_id,
                 )
             st.session_state["hall_booking_notice"] = (
@@ -1354,21 +1470,136 @@ def show_hall_booking_page() -> None:
     elif not access.can_edit_pairings:
         st.caption("Für die Aktualisierung ist die Bearbeiterrolle erforderlich.")
 
+    st.subheader("Buchungsübersicht")
+    display_frames = []
     if stored_hall_bookings is not None:
-        bookings = hall_booking_display(stored_hall_bookings.bookings)
-        if bookings.empty:
-            st.info("Im gespeicherten Zeitraum wurden keine Buchungen gefunden.")
-        else:
-            st.dataframe(
-                bookings,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Datum": st.column_config.DateColumn(format="DD.MM.YYYY"),
-                    "Von": st.column_config.TimeColumn(format="HH:mm"),
-                    "Bis": st.column_config.TimeColumn(format="HH:mm"),
-                },
+        visible = visible_hall_bookings(stored_hall_bookings.bookings)
+        display_frames.append(hall_booking_display(visible, "OMOC"))
+    if stored_manual_hall_bookings is not None:
+        visible = visible_hall_bookings(stored_manual_hall_bookings.bookings)
+        display_frames.append(hall_booking_display(visible, "Manuell"))
+    display_bookings = (
+        pd.concat(display_frames, ignore_index=True)
+        if display_frames
+        else pd.DataFrame()
+    )
+    if display_bookings.empty:
+        st.info(
+            "Für Wochenenden, Feiertage und abweichende Spieltage sind noch "
+            "keine Buchungen gespeichert."
+        )
+    else:
+        display_bookings = display_bookings.sort_values(
+            ["Datum", "Von", "Sportstätte"], ignore_index=True
+        )
+        st.dataframe(
+            display_bookings,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Quelle": st.column_config.TextColumn(width="small"),
+                "Buchungsnummer": st.column_config.TextColumn(width="medium"),
+                "Datum": st.column_config.DateColumn(
+                    format="DD.MM.YYYY", width="small"
+                ),
+                "Von": st.column_config.TimeColumn(format="HH:mm", width="small"),
+                "Bis": st.column_config.TimeColumn(format="HH:mm", width="small"),
+                "Sportstätte": st.column_config.TextColumn(width="large"),
+                "Gebuchte Bereiche": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+    st.subheader("Manuelle Buchungen")
+    st.caption(
+        "Aktuell steht Oberhausen zur Auswahl. Weitere Hallen können später "
+        "als feste Auswahl ergänzt werden."
+    )
+    if stored_manual_hall_bookings is not None:
+        manual_updated_at = pd.Timestamp(
+            stored_manual_hall_bookings.updated_at
+        ).tz_convert(ZoneInfo("Europe/Berlin"))
+        st.caption(
+            f"Zuletzt gespeichert am {manual_updated_at:%d.%m.%Y um %H:%M Uhr} "
+            f"von {stored_manual_hall_bookings.updated_by or 'Unbekannter Benutzer'}"
+        )
+
+    manual_source = manual_hall_editor_frame(
+        stored_manual_hall_bookings.bookings
+        if stored_manual_hall_bookings is not None
+        else pd.DataFrame(columns=BOOKING_COLUMNS)
+    )
+    editor_version = st.session_state.get("manual_hall_editor_version", 0)
+    manual_editor = st.data_editor(
+        manual_source,
+        hide_index=True,
+        width="stretch",
+        num_rows="dynamic" if access.can_edit_pairings else "fixed",
+        disabled=not access.can_edit_pairings,
+        key=f"manual_hall_editor_{editor_version}",
+        column_config={
+            "Sportstätte": st.column_config.SelectboxColumn(
+                options=[
+                    HALL_BOOKING_DISPLAY_NAMES[hall_number]
+                    for hall_number in sorted(MANUAL_HALL_NUMBERS)
+                ],
+                required=True,
+                width="large",
+            ),
+            "Datum": st.column_config.DateColumn(
+                format="DD.MM.YYYY",
+                min_value=date_from,
+                max_value=date_to,
+                required=True,
+                width="medium",
+            ),
+            "Von": st.column_config.TimeColumn(
+                format="HH:mm", required=True, width="small"
+            ),
+            "Bis": st.column_config.TimeColumn(
+                format="HH:mm", required=True, width="small"
+            ),
+        },
+    )
+    st.caption(
+        "Erlaubt sind Samstage, Sonntage, bayerische Feiertage und einzelne "
+        "Wochentage, an denen laut Spielplan ein Spiel in der gewählten Halle "
+        "stattfindet."
+    )
+
+    deletion_confirmed = True
+    if len(manual_editor) < len(manual_source):
+        deletion_confirmed = st.checkbox(
+            "Das Entfernen gespeicherter manueller Buchungen bestätigen"
+        )
+    if st.button(
+        "Manuelle Buchungen speichern",
+        type="primary",
+        disabled=(
+            not access.can_edit_pairings
+            or hall_booking_store is None
+            or not deletion_confirmed
+        ),
+    ):
+        try:
+            manual_bookings = manual_bookings_from_editor(
+                pd.DataFrame(manual_editor), date_from, date_to
             )
+            hall_booking_store.save_manual_bookings(
+                SEASON,
+                manual_bookings,
+                date_from,
+                date_to,
+                access.display_name or access.object_id,
+            )
+            st.session_state["manual_hall_editor_version"] = editor_version + 1
+            st.session_state["hall_booking_notice"] = (
+                f"{len(manual_bookings)} manuelle Buchung(en) wurden gespeichert."
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception:
+            st.error("Die manuellen Buchungen konnten nicht gespeichert werden.")
 
 def show_guide_page() -> None:
     st.header("Anleitung")
@@ -1416,9 +1647,12 @@ def show_guide_page() -> None:
         "Hallenteile sowie Verkaufsraum beziehungsweise Küche als Bewirtungsraum. "
         "Das Tagesfenster beginnt 45 Minuten vor dem ersten Spiel und endet "
         "45 Minuten nach dem berechneten Ende des letzten Spiels. Fehlende und "
-        "unnötig lange Buchungszeiten werden getrennt ausgewiesen. "
-        "Andere Sportstätten, Kostensätze und personenbezogene Buchungsdaten werden "
-        "nicht verarbeitet."
+        "unnötig lange Buchungszeiten werden getrennt ausgewiesen. Für die "
+        "Sporthalle an der Seeleite des BSC Oberhausen können Buchungen auf der "
+        "Seite Hallenbuchungen manuell gepflegt werden. Die Übersicht zeigt nur "
+        "Samstage, Sonntage und bayerische Feiertage sowie einzelne Wochentage "
+        "mit einem Spiel in der jeweiligen Halle. Kostensätze und "
+        "personenbezogene Buchungsdaten werden nicht verarbeitet."
     )
 
     st.subheader("5. Gesamten Spielplan prüfen")
@@ -1652,6 +1886,7 @@ omoc_client = (
 )
 hall_booking_store = None
 stored_hall_bookings: StoredHallBookings | None = None
+stored_manual_hall_bookings: StoredHallBookings | None = None
 hall_booking_storage_error = ""
 if connection_string:
     try:
@@ -1662,6 +1897,9 @@ if connection_string:
             ),
         )
         stored_hall_bookings = hall_booking_store.latest_bookings(SEASON)
+        stored_manual_hall_bookings = hall_booking_store.latest_manual_bookings(
+            SEASON
+        )
     except Exception as exc:
         hall_booking_storage_error = str(exc)
 

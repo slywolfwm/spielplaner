@@ -48,13 +48,45 @@ class HallBookingStore:
         date_to: date,
         updated_by: str,
     ) -> StoredHallBookings:
+        return self._save_snapshot(
+            _safe_segment(season),
+            bookings,
+            date_from,
+            date_to,
+            updated_by,
+        )
+
+    def save_manual_bookings(
+        self,
+        season: str,
+        bookings: pd.DataFrame,
+        date_from: date,
+        date_to: date,
+        updated_by: str,
+    ) -> StoredHallBookings:
+        return self._save_snapshot(
+            f"manual/{_safe_segment(season)}",
+            bookings,
+            date_from,
+            date_to,
+            updated_by,
+        )
+
+    def _save_snapshot(
+        self,
+        prefix: str,
+        bookings: pd.DataFrame,
+        date_from: date,
+        date_to: date,
+        updated_by: str,
+    ) -> StoredHallBookings:
         if date_to < date_from:
             raise ValueError("Das Enddatum liegt vor dem Startdatum.")
         content = _serialize_bookings(bookings)
         now = datetime.now(timezone.utc)
         digest = hashlib.sha256(content).hexdigest()[:12]
         timestamp = now.strftime("%Y%m%dT%H%M%S%fZ")
-        blob_name = f"{_safe_segment(season)}/{timestamp}-{digest}.json"
+        blob_name = f"{prefix}/{timestamp}-{digest}.json"
         metadata = {
             "datefrom": date_from.isoformat(),
             "dateto": date_to.isoformat(),
@@ -79,7 +111,12 @@ class HallBookingStore:
         )
 
     def latest_bookings(self, season: str) -> StoredHallBookings | None:
-        prefix = f"{_safe_segment(season)}/"
+        return self._latest_snapshot(f"{_safe_segment(season)}/")
+
+    def latest_manual_bookings(self, season: str) -> StoredHallBookings | None:
+        return self._latest_snapshot(f"manual/{_safe_segment(season)}/")
+
+    def _latest_snapshot(self, prefix: str) -> StoredHallBookings | None:
         blobs = list(
             self.container_client.list_blobs(
                 name_starts_with=prefix,

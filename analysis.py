@@ -55,11 +55,15 @@ HALL_BOOKING_REQUIREMENTS = {
         ("7709", "Halle West"),
         ("7725", "Bewirtungsraum (Küche)"),
     ),
+    "270141": (("manual:270141", "Gesamte Halle"),),
 }
 HALL_BOOKING_DISPLAY_NAMES = {
     "270461": "Jahnhalle",
     "270462": "Hardtschule",
+    "270141": "BSC Oberhausen – Sporthalle an der Seeleite",
 }
+OMOC_HALL_NUMBERS = frozenset({"270461", "270462"})
+MANUAL_HALL_NUMBERS = frozenset({"270141"})
 
 TRAVEL_LEG_COLUMNS = [
     "Priorität",

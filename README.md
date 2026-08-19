@@ -153,8 +153,10 @@ abdecken. Eine fehlende oder zeitlich zu kurze Buchung erzeugt genau einen Befun
 pro Halle und Tag. Eine mit dem Tagesfenster verbundene Buchung, die davor oder
 danach länger läuft, wird als nicht benötigte Buchungszeit separat ausgewiesen.
 Zeitlich getrennte Handball-Buchungen desselben Tages, beispielsweise für ein
-Training, gelten nicht als Überbuchung des Spieltags. Andere Sportstätten,
-Kostensätze, Namen und Veranstaltungstitel werden verworfen.
+Training, gelten nicht als Überbuchung des Spieltags. Für die Sporthalle an der
+Seeleite des BSC Oberhausen werden Buchungen manuell in der App gepflegt und
+ebenfalls versioniert in Azure Blob Storage gespeichert. Kostensätze, Namen und
+Veranstaltungstitel aus OMOC werden verworfen.
 
 OMOC-Zugangsdaten werden ausschließlich als Azure App Settings gespeichert:
 
@@ -169,7 +171,10 @@ az webapp config appsettings set --resource-group rg-spielplaner \
 Die Seite **Hallenbuchungen** übernimmt den relevanten Buchungsstand auf Knopfdruck
 aus OMOC. Jeder Stand wird versioniert in Azure Blob Storage gespeichert und mit
 Aktualisierungszeitpunkt und angemeldetem Bearbeiter versehen. Die
-Spielplanprüfung verwendet ausschließlich den neuesten gespeicherten Stand.
+Spielplanprüfung verwendet ausschließlich den neuesten gespeicherten Stand. In
+der Buchungsübersicht erscheinen nur Samstage, Sonntage und bayerische Feiertage.
+Eine Buchung an einem Werktag wird zusätzlich angezeigt und kann gespeichert
+werden, wenn der Spielplan an diesem Tag ein Spiel in derselben Halle enthält.
 
 Regelgrundlagen für die Startwerte:
 

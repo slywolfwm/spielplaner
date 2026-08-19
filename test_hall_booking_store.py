@@ -108,3 +108,29 @@ def test_empty_hall_booking_snapshot_can_be_saved():
 
     assert latest is not None
     assert latest.bookings.empty
+
+
+def test_manual_bookings_are_stored_separately_from_omoc_snapshots():
+    store = HallBookingStore(FakeContainer())
+    period_start = date(2026, 9, 1)
+    period_end = date(2027, 4, 30)
+
+    store.save_bookings(
+        "2026-27", booking_frame("OMOC"), period_start, period_end, "OMOC User"
+    )
+    store.save_manual_bookings(
+        "2026-27",
+        booking_frame("MANUELL"),
+        period_start,
+        period_end,
+        "Manual User",
+    )
+
+    omoc = store.latest_bookings("2026-27")
+    manual = store.latest_manual_bookings("2026-27")
+
+    assert omoc is not None
+    assert manual is not None
+    assert omoc.bookings.iloc[0]["Buchungsnummer"] == "OMOC"
+    assert manual.bookings.iloc[0]["Buchungsnummer"] == "MANUELL"
+    assert manual.updated_by == "Manual User"

@@ -385,6 +385,34 @@ def test_hall_booking_uses_first_and_last_game_with_setup_and_teardown():
     assert find_hall_booking_excesses(blocks, bookings).empty
 
 
+def test_manual_oberhausen_booking_covers_full_required_window():
+    blocks = pd.DataFrame(
+        [
+            {
+                "Datum": pd.Timestamp("2026-09-20").date(),
+                "Hallennummer": "270141",
+                "Halle": "Huglfing, Sporthalle an der Seeleite",
+                "Mannschaft": "BSC Oberhausen – wA",
+                "Gegner": "Gegner",
+                "Anwurf": pd.Timestamp("2026-09-20 17:00"),
+                "Spielende": pd.Timestamp("2026-09-20 18:20"),
+            }
+        ]
+    )
+    bookings = pd.DataFrame(
+        [
+            {
+                "Buchungsbeginn": pd.Timestamp("2026-09-20 16:15"),
+                "Buchungsende": pd.Timestamp("2026-09-20 19:05"),
+                "Raum-IDs": frozenset({"manual:270141"}),
+            }
+        ]
+    )
+
+    assert find_hall_booking_conflicts(blocks, bookings).empty
+    assert find_hall_booking_excesses(blocks, bookings).empty
+
+
 def test_hall_booking_flags_excess_connected_to_required_window_once_per_day():
     blocks = pd.DataFrame(
         [
