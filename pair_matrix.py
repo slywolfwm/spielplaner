@@ -36,9 +36,9 @@ def team_category(label: str) -> str:
     concise = matrix_team_label(label)
     if re.search(r"\b(?:Herren|Damen)\b", concise, flags=re.IGNORECASE):
         return "Erwachsene"
-    if re.search(r"\bw[ABC]\b", concise):
+    if re.search(r"\bw[ABCD]\b", concise):
         return "Weibliche Jugend"
-    if re.search(r"\bm[ABC]\b", concise):
+    if re.search(r"\bm[ABCD]\b", concise):
         return "Männliche Jugend"
     return "Kinder"
 
@@ -55,22 +55,17 @@ def sort_pair_labels(labels: Sequence[str]) -> list[str]:
         elif category == "Weibliche Jugend":
             age_rank = next(
                 index
-                for index, age in enumerate(("wA", "wB", "wC"))
+                for index, age in enumerate(("wA", "wB", "wC", "wD"))
                 if re.search(rf"\b{age}\b", concise)
             )
         elif category == "Männliche Jugend":
             age_rank = next(
                 index
-                for index, age in enumerate(("mA", "mB", "mC"))
+                for index, age in enumerate(("mA", "mB", "mC", "mD"))
                 if re.search(rf"\b{age}\b", concise)
             )
         else:
-            child_markers = (
-                r"\bwD\b",
-                r"\bmD\b",
-                r"\bE-Jugend\b",
-                r"\bMinis\b",
-            )
+            child_markers = (r"\bE-Jugend\b", r"\bMinis\b")
             age_rank = next(
                 (
                     index

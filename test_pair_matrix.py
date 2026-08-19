@@ -51,6 +51,7 @@ def test_pair_matrix_sorts_adults_then_female_male_and_children():
         "BSC Oberhausen – BOL wA SW (BOL wA)",
         "TSV Weilheim – BOL mA SW (BOL mA)",
         "TSV Weilheim – wD",
+        "TSV Weilheim – mD",
     ]
 
     sorted_labels = sort_pair_labels(labels)
@@ -60,9 +61,10 @@ def test_pair_matrix_sorts_adults_then_female_male_and_children():
         "TSV Weilheim – Damen II",
         "BSC Oberhausen – BOL wA SW (BOL wA)",
         "TSV Weilheim – BOL wC S2 (BOL wC)",
+        "TSV Weilheim – wD",
         "TSV Weilheim – BOL mA SW (BOL mA)",
         "TSV Weilheim – BOL mC S (BOL mC)",
-        "TSV Weilheim – wD",
+        "TSV Weilheim – mD",
         "TSV Weilheim – Minis",
     ]
     assert [team_category(label) for label in sorted_labels] == [
@@ -70,8 +72,9 @@ def test_pair_matrix_sorts_adults_then_female_male_and_children():
         "Erwachsene",
         "Weibliche Jugend",
         "Weibliche Jugend",
+        "Weibliche Jugend",
         "Männliche Jugend",
         "Männliche Jugend",
-        "Kinder",
+        "Männliche Jugend",
         "Kinder",
     ]

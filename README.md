@@ -166,6 +166,11 @@ az webapp config appsettings set --resource-group rg-spielplaner \
     OMOC_API_PASSWORD="HIER_NEUES_OMOC_KENNWORT"
 ```
 
+Die Seite **Hallenbuchungen** übernimmt den relevanten Buchungsstand auf Knopfdruck
+aus OMOC. Jeder Stand wird versioniert in Azure Blob Storage gespeichert und mit
+Aktualisierungszeitpunkt und angemeldetem Bearbeiter versehen. Die
+Spielplanprüfung verwendet ausschließlich den neuesten gespeicherten Stand.
+
 Regelgrundlagen für die Startwerte:
 
 - [BHV-Durchführungsbestimmungen A-/B-/C-Jugend 2026/27](https://www.bhv-online.de/filemanager/BHV/Daten/Spielbetrieb/Durchfuehrungsbestimmungen/26_27/2026-03-dfb-c-a.pdf)
@@ -197,6 +202,8 @@ Umgebungsvariablen:
   ist `teamdurations`
 - `AZURE_SCHEDULE_CONTAINER_NAME`: optionaler Blob-Container für versionierte
   Spielplan-Uploads, Standard ist `schedules`
+- `AZURE_HALL_BOOKING_CONTAINER_NAME`: optionaler Blob-Container für versionierte
+  OMOC-Buchungsstände, Standard ist `hall-bookings`
 - `AZURE_TRAVEL_TIME_TABLE_NAME`: optionaler Tabellenname für den Fahrzeitcache,
   Standard ist `traveltimes`
 - `MICROSOFT_TENANT_ID`: Tenant, dessen angemeldete Benutzer die App verwenden

@@ -1,5 +1,6 @@
 import os
 from base64 import b64encode
+from datetime import date
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +16,7 @@ from access_control import (
     parse_oidc_user,
 )
 from analysis import (
+    HALL_BOOKING_DISPLAY_NAMES,
     HALL_BOOKING_REQUIREMENTS,
     RULE_HOME_BUFFER,
     RULE_HALL_BOOKING,
@@ -34,7 +36,8 @@ from analysis import (
     travel_leg_key,
 )
 from duration_store import DurationStore
-from omoc import OmocClient, OmocError
+from hall_booking_store import HallBookingStore, StoredHallBookings
+from omoc import OmocClient
 from pair_matrix import (
     TEAM_CATEGORY_ORDER,
     build_pair_matrix,
@@ -86,6 +89,11 @@ TRAVEL_HELP = (
     "einem fehlenden oder abgelaufenen Cache-Eintrag aufgerufen. Die Planungszeit "
     "besteht aus der Verkehrsfahrtzeit, einem Sicherheitszuschlag und einem "
     "Puffer für Parkplatz und Hallenweg."
+)
+HALL_BOOKING_HELP = (
+    "Zeigt den zuletzt aus OMOC übernommenen Buchungsstand für Jahnhalle und "
+    "Hardtschule. Berechtigte Benutzer können die Grunddaten für den im "
+    "Spielplan benötigten Zeitraum aktualisieren."
 )
 
 
@@ -455,6 +463,13 @@ def create_schedule_store(
 
 
 @st.cache_resource(show_spinner=False)
+def create_hall_booking_store(
+    connection_string: str, container_name: str
+) -> HallBookingStore:
+    return HallBookingStore.from_connection_string(connection_string, container_name)
+
+
+@st.cache_resource(show_spinner=False)
 def create_azure_maps_client(
     subscription_key: str, safety_percent: int, transfer_buffer_minutes: int
 ) -> AzureMapsClient:
@@ -716,9 +731,7 @@ def show_azure_maps_attribution() -> None:
     )
 
 
-def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
-    if omoc_client is None:
-        return None, "OMOC ist noch nicht konfiguriert."
+def relevant_hall_booking_period() -> tuple[date, date] | None:
     blocks = home_game_blocks(
         schedule, teams, current_duration_map(), PRE_GAME_BUFFER_MINUTES
     )
@@ -726,16 +739,33 @@ def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
         blocks["Hallennummer"].astype(str).isin(HALL_BOOKING_REQUIREMENTS)
     ]
     if relevant.empty:
+        return None
+    return relevant["Datum"].min(), relevant["Datum"].max()
+
+
+def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
+    period = relevant_hall_booking_period()
+    if period is None:
         return pd.DataFrame(), ""
-    try:
+    if hall_booking_storage_error:
+        return None, "Der gespeicherte OMOC-Buchungsstand ist nicht erreichbar."
+    if stored_hall_bookings is None:
         return (
-            omoc_client.fetch_bookings(
-                relevant["Datum"].min(), relevant["Datum"].max()
-            ),
-            "",
+            None,
+            "Noch keine Hallenbuchungen gespeichert. Bitte auf der Seite "
+            "Hallenbuchungen aktualisieren.",
         )
-    except (OmocError, ValueError) as exc:
-        return None, str(exc)
+    date_from, date_to = period
+    if (
+        stored_hall_bookings.date_from > date_from
+        or stored_hall_bookings.date_to < date_to
+    ):
+        return (
+            None,
+            "Der gespeicherte OMOC-Buchungsstand deckt den aktuellen Spielplan "
+            "nicht vollständig ab. Bitte Hallenbuchungen aktualisieren.",
+        )
+    return stored_hall_bookings.bookings.copy(), ""
 
 
 def show_analysis_page() -> None:
@@ -1207,6 +1237,139 @@ def show_travel_page() -> None:
             "entsprechend ihrer zulässigen Gültigkeit persistent wiederverwendet."
         )
 
+
+def hall_booking_display(bookings: pd.DataFrame) -> pd.DataFrame:
+    room_details = {
+        room_id: (HALL_BOOKING_DISPLAY_NAMES[hall_id], room_name)
+        for hall_id, rooms in HALL_BOOKING_REQUIREMENTS.items()
+        for room_id, room_name in rooms
+    }
+    room_order = {room_id: index for index, room_id in enumerate(room_details)}
+    rows = []
+    for booking in bookings.sort_values("Buchungsbeginn").to_dict("records"):
+        room_ids = sorted(
+            booking["Raum-IDs"], key=lambda room_id: room_order.get(room_id, 999)
+        )
+        facilities = list(
+            dict.fromkeys(
+                room_details[room_id][0]
+                for room_id in room_ids
+                if room_id in room_details
+            )
+        )
+        room_names = [
+            room_details[room_id][1]
+            for room_id in room_ids
+            if room_id in room_details
+        ]
+        starts_at = pd.Timestamp(booking["Buchungsbeginn"])
+        ends_at = pd.Timestamp(booking["Buchungsende"])
+        rows.append(
+            {
+                "Buchungsnummer": booking["Buchungsnummer"],
+                "Datum": starts_at.date(),
+                "Von": starts_at.time(),
+                "Bis": ends_at.time(),
+                "Sportstätte": ", ".join(facilities),
+                "Gebuchte Bereiche": ", ".join(room_names),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Buchungsnummer",
+            "Datum",
+            "Von",
+            "Bis",
+            "Sportstätte",
+            "Gebuchte Bereiche",
+        ],
+    )
+
+
+def show_hall_booking_page() -> None:
+    st.header("Hallenbuchungen", help=HALL_BOOKING_HELP)
+    show_core_metrics()
+
+    notice = st.session_state.pop("hall_booking_notice", "")
+    if notice:
+        st.success(notice)
+
+    period = relevant_hall_booking_period()
+    if period is None:
+        st.info("Im aktuellen Spielplan sind keine relevanten Heimspiele enthalten.")
+        return
+
+    date_from, date_to = period
+    if stored_hall_bookings is None:
+        st.info("Es wurde noch kein Buchungsstand aus OMOC gespeichert.")
+    else:
+        updated_at = pd.Timestamp(stored_hall_bookings.updated_at).tz_convert(
+            ZoneInfo("Europe/Berlin")
+        )
+        st.markdown(
+            f"**Letzte Aktualisierung:** {updated_at:%d.%m.%Y um %H:%M Uhr}  \n"
+            f"**Aktualisiert von:** "
+            f"{stored_hall_bookings.updated_by or 'Unbekannter Benutzer'}"
+        )
+        st.caption(
+            f"Gespeicherter Abfragezeitraum: "
+            f"{stored_hall_bookings.date_from:%d.%m.%Y} bis "
+            f"{stored_hall_bookings.date_to:%d.%m.%Y}"
+        )
+
+    can_refresh = (
+        access.can_edit_pairings
+        and hall_booking_store is not None
+        and omoc_client is not None
+    )
+    if st.button(
+        "Hallenbuchungen aus OMOC aktualisieren",
+        type="primary",
+        disabled=not can_refresh,
+    ):
+        try:
+            with st.spinner("Hallenbuchungen werden aus OMOC geladen …"):
+                bookings = omoc_client.fetch_bookings(date_from, date_to)
+                hall_booking_store.save_bookings(
+                    SEASON,
+                    bookings,
+                    date_from,
+                    date_to,
+                    access.display_name or access.object_id,
+                )
+            st.session_state["hall_booking_notice"] = (
+                f"{len(bookings)} Buchung(en) wurden aus OMOC aktualisiert."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Die Hallenbuchungen konnten nicht aktualisiert werden: {exc}")
+
+    if hall_booking_storage_error:
+        st.warning("Azure Blob Storage ist für Hallenbuchungen nicht erreichbar.")
+    elif hall_booking_store is None:
+        st.warning("Azure Blob Storage ist noch nicht konfiguriert.")
+    elif omoc_client is None:
+        st.warning("OMOC ist noch nicht konfiguriert.")
+    elif not access.can_edit_pairings:
+        st.caption("Für die Aktualisierung ist die Bearbeiterrolle erforderlich.")
+
+    if stored_hall_bookings is not None:
+        bookings = hall_booking_display(stored_hall_bookings.bookings)
+        if bookings.empty:
+            st.info("Im gespeicherten Zeitraum wurden keine Buchungen gefunden.")
+        else:
+            st.dataframe(
+                bookings,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Datum": st.column_config.DateColumn(format="DD.MM.YYYY"),
+                    "Von": st.column_config.TimeColumn(format="HH:mm"),
+                    "Bis": st.column_config.TimeColumn(format="HH:mm"),
+                },
+            )
+
 def show_guide_page() -> None:
     st.header("Anleitung")
     show_core_metrics()
@@ -1352,6 +1515,12 @@ page = st.navigation(
             url_path="fahrzeiten",
         ),
         st.Page(
+            show_hall_booking_page,
+            title="Hallenbuchungen",
+            icon=":material/event_available:",
+            url_path="hallenbuchungen",
+        ),
+        st.Page(
             show_guide_page,
             title="Anleitung",
             icon=":material/help:",
@@ -1481,6 +1650,20 @@ omoc_client = (
     if omoc_bookings_url and omoc_username and omoc_password
     else None
 )
+hall_booking_store = None
+stored_hall_bookings: StoredHallBookings | None = None
+hall_booking_storage_error = ""
+if connection_string:
+    try:
+        hall_booking_store = create_hall_booking_store(
+            connection_string,
+            configured_value(
+                "AZURE_HALL_BOOKING_CONTAINER_NAME", "hall-bookings"
+            ),
+        )
+        stored_hall_bookings = hall_booking_store.latest_bookings(SEASON)
+    except Exception as exc:
+        hall_booking_storage_error = str(exc)
 
 if connection_string:
     try:
