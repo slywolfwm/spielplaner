@@ -39,6 +39,7 @@ from analysis import (
 )
 from booking_calendar import is_visible_booking_day
 from duration_store import DurationStore
+from excel_report import build_excel_report
 from hall_booking_store import HallBookingStore, StoredHallBookings
 from manual_hall_bookings import bookings_from_editor
 from omoc import BOOKING_COLUMNS, OmocClient
@@ -51,7 +52,13 @@ from pair_matrix import (
 )
 from pair_store import PairStore, StoredPair, pair_row_key
 from priorities import PRIORITY_LEVELS, normalize_priority
-from schedule_store import ScheduleStore, StoredSchedule
+from schedule_store import ScheduleStore, ScheduleVersion, StoredSchedule
+from schedule_workflow import (
+    compare_findings,
+    compare_schedules,
+    relevant_schedule_overview,
+    reschedule_game,
+)
 from travel_time_store import TravelTimeStore
 from travel_times import AzureMapsClient, AzureMapsError
 
@@ -605,9 +612,11 @@ def pairs_for_analysis(
 
 def relevant_travel_legs(
     analysis_pairs: list[tuple[Team, Team, str]],
+    frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    source = schedule if frame is None else frame
     return find_relevant_travel_legs(
-        schedule,
+        source,
         analysis_pairs,
         current_duration_map(),
         PRE_GAME_BUFFER_MINUTES,
@@ -746,16 +755,20 @@ def show_azure_maps_attribution() -> None:
     )
 
 
-def relevant_hall_booking_blocks() -> pd.DataFrame:
+def relevant_hall_booking_blocks(
+    frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    source = schedule if frame is None else frame
     return home_game_blocks(
-        schedule, teams, current_duration_map(), PRE_GAME_BUFFER_MINUTES
+        source, teams, current_duration_map(), PRE_GAME_BUFFER_MINUTES
     )
 
 
 def relevant_hall_booking_period(
     hall_numbers: set[str] | frozenset[str] | None = None,
+    frame: pd.DataFrame | None = None,
 ) -> tuple[date, date] | None:
-    blocks = relevant_hall_booking_blocks()
+    blocks = relevant_hall_booking_blocks(frame)
     targets = hall_numbers or frozenset(HALL_BOOKING_REQUIREMENTS)
     relevant = blocks[
         blocks["Hallennummer"].astype(str).isin(targets)
@@ -765,11 +778,13 @@ def relevant_hall_booking_period(
     return relevant["Datum"].min(), relevant["Datum"].max()
 
 
-def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
+def resolve_hall_bookings(
+    frame: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame | None, str]:
     if hall_booking_storage_error:
         return None, "Der gespeicherte OMOC-Buchungsstand ist nicht erreichbar."
     frames = []
-    omoc_period = relevant_hall_booking_period(OMOC_HALL_NUMBERS)
+    omoc_period = relevant_hall_booking_period(OMOC_HALL_NUMBERS, frame)
     if omoc_period is not None:
         if stored_hall_bookings is None:
             return (
@@ -796,11 +811,438 @@ def resolve_hall_bookings() -> tuple[pd.DataFrame | None, str]:
     return pd.concat(frames, ignore_index=True), ""
 
 
+def local_timestamp(value: object) -> str:
+    if not value:
+        return "Noch nicht gespeichert"
+    parsed = pd.Timestamp(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.tz_localize("UTC")
+    return parsed.tz_convert(ZoneInfo("Europe/Berlin")).strftime(
+        "%d.%m.%Y, %H:%M Uhr"
+    )
+
+
+def latest_value(values: list[tuple[object, str]]) -> tuple[object, str]:
+    available = [(pd.Timestamp(value), person) for value, person in values if value]
+    if not available:
+        return "", ""
+    return max(available, key=lambda item: item[0])
+
+
+def data_status_frame(saved_pairs: list[StoredPair]) -> pd.DataFrame:
+    pair_time, pair_user = latest_value(
+        [(pair.created_at, pair.created_by) for pair in saved_pairs]
+    )
+    duration_time, duration_user = latest_value(
+        [
+            (duration.updated_at, duration.updated_by)
+            for duration in stored_durations.values()
+        ]
+    )
+    hall_values = []
+    if stored_hall_bookings is not None:
+        hall_values.append(
+            (stored_hall_bookings.updated_at, stored_hall_bookings.updated_by)
+        )
+    if stored_manual_hall_bookings is not None:
+        hall_values.append(
+            (
+                stored_manual_hall_bookings.updated_at,
+                stored_manual_hall_bookings.updated_by,
+            )
+        )
+    hall_time, hall_user = latest_value(hall_values)
+
+    if active_schedule is not None:
+        schedule_time = active_schedule.uploaded_at
+        schedule_user = active_schedule.uploaded_by
+        schedule_details = active_schedule.original_name
+    else:
+        schedule_time = ""
+        schedule_user = ""
+        schedule_details = "Mitgelieferter Saisonstand"
+
+    return pd.DataFrame(
+        [
+            {
+                "Datenbestand": "Spielplan",
+                "Stand": local_timestamp(schedule_time),
+                "Person": schedule_user or "System",
+                "Details": schedule_details,
+            },
+            {
+                "Datenbestand": "Mannschaftspaare",
+                "Stand": local_timestamp(pair_time),
+                "Person": pair_user or "-",
+                "Details": f"{len(saved_pairs)} gespeicherte Paarungen",
+            },
+            {
+                "Datenbestand": "Spieldauern",
+                "Stand": local_timestamp(duration_time),
+                "Person": duration_user or "-",
+                "Details": f"{len(stored_durations)} gespeicherte Werte",
+            },
+            {
+                "Datenbestand": "Hallenbuchungen",
+                "Stand": local_timestamp(hall_time),
+                "Person": hall_user or "-",
+                "Details": "OMOC und manuelle Buchungen",
+            },
+        ]
+    )
+
+
+def report_metadata_frame(saved_pairs: list[StoredPair]) -> pd.DataFrame:
+    status = data_status_frame(saved_pairs).copy()
+    generated_at = pd.Timestamp.now(tz=ZoneInfo("Europe/Berlin"))
+    rows = [
+        {
+            "Datenbestand": "Bericht",
+            "Stand": generated_at.strftime("%d.%m.%Y, %H:%M Uhr"),
+            "Person": access.display_name or access.object_id or "Microsoft-Benutzer",
+            "Details": f"Saison {SEASON}",
+        }
+    ]
+    rows.extend(status.to_dict("records"))
+    if active_schedule is not None and active_schedule.sha256:
+        rows.append(
+            {
+                "Datenbestand": "Spielplan-Prüfsumme",
+                "Stand": "SHA-256",
+                "Person": "System",
+                "Details": active_schedule.sha256,
+            }
+        )
+    comparison = st.session_state.get("schedule_comparison")
+    if comparison and comparison.get("active_blob") == (
+        active_schedule.blob_name if active_schedule is not None else ""
+    ):
+        version = comparison["version"]
+        rows.append(
+            {
+                "Datenbestand": "Vergleichsversion",
+                "Stand": local_timestamp(version.uploaded_at),
+                "Person": version.uploaded_by or "-",
+                "Details": version.original_name,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def analysis_context_key(
+    analysis_pairs: list[tuple[Team, Team, str]],
+) -> str:
+    digest = sha256()
+    schedule_columns = [
+        "Anwurf",
+        "Hallennummer",
+        "Spielnummer",
+        "Liga",
+        "Staffelkurzbezeichnung",
+        "Heimmannschaft",
+        "Gastmannschaft",
+    ]
+    digest.update(
+        pd.util.hash_pandas_object(
+            schedule[schedule_columns], index=False
+        ).values.tobytes()
+    )
+    digest.update(repr(sorted(current_duration_map().items())).encode("utf-8"))
+    digest.update(
+        repr(
+            sorted(
+                (team_a.key, team_b.key, priority)
+                for team_a, team_b, priority in analysis_pairs
+            )
+        ).encode("utf-8")
+    )
+    return digest.hexdigest()
+
+
+def show_findings_table(findings: pd.DataFrame) -> None:
+    st.dataframe(
+        findings,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Priorität": st.column_config.TextColumn(width="small"),
+            "Regel": st.column_config.TextColumn(width="medium"),
+            "Datum": st.column_config.DateColumn(format="DD.MM.YYYY", width="small"),
+            "Spiele": st.column_config.TextColumn(width="large"),
+            "Kommentar": st.column_config.TextColumn(width="large"),
+        },
+    )
+
+
+def show_analysis_result(
+    result: dict[str, object],
+    overview: pd.DataFrame,
+    saved_pairs: list[StoredPair],
+) -> None:
+    findings = result["findings"]
+    travel_stats = result["travel_stats"]
+    hall_booking_error = str(result.get("hall_booking_error", ""))
+    show_travel_status(travel_stats)
+    if hall_booking_error:
+        st.warning(
+            "Die Hallenbuchungsregel wurde nicht ausgewertet: "
+            f"{hall_booking_error}"
+        )
+    if findings.empty:
+        st.success("Die aktiven Regeln haben keine Auffälligkeiten gefunden.")
+    else:
+        st.error(f"{len(findings)} Auffälligkeit(en) gefunden.")
+        show_findings_table(findings)
+
+    comparison = st.session_state.get("schedule_comparison", {})
+    changes = comparison.get("changes")
+    report = build_excel_report(
+        findings,
+        overview.drop(columns="Spielschlüssel"),
+        report_metadata_frame(saved_pairs),
+        changes if isinstance(changes, pd.DataFrame) else None,
+    )
+    generated = pd.Timestamp.now(tz=ZoneInfo("Europe/Berlin"))
+    st.download_button(
+        "Excel-Bericht herunterladen",
+        report,
+        f"spielplan_pruefung_{generated:%Y-%m-%d_%H%M}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    if travel_stats["resolved"]:
+        show_azure_maps_attribution()
+
+
+def show_reschedule_check(
+    overview: pd.DataFrame,
+    analysis_pairs: list[tuple[Team, Team, str]],
+    context_key: str,
+) -> None:
+    st.subheader("Spielplanübersicht")
+    st.caption(
+        "Spiel auswählen, möglichen Termin eintragen und gegen alle aktiven Regeln prüfen."
+    )
+    display = overview.drop(
+        columns=["Spielschlüssel", "Wettbewerb", "Spielnummer"]
+    )
+    event = st.dataframe(
+        display,
+        key="schedule_overview",
+        hide_index=True,
+        width="stretch",
+        height=360,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "Anwurf": st.column_config.DatetimeColumn(
+                format="DD.MM.YYYY HH:mm", width="medium"
+            ),
+            "Mannschaft": st.column_config.TextColumn(width="medium"),
+            "Gegner": st.column_config.TextColumn(width="medium"),
+            "Heim/Auswärts": st.column_config.TextColumn(width="small"),
+            "Wettbewerb": st.column_config.TextColumn(width="medium"),
+            "Halle": st.column_config.TextColumn(width="large"),
+        },
+    )
+    selected_rows = event.selection.rows
+    if not selected_rows:
+        st.info("Für eine Terminprobe bitte eine Tabellenzeile auswählen.")
+        return
+
+    selected = overview.iloc[selected_rows[0]]
+    kickoff = pd.Timestamp(selected["Anwurf"])
+    widget_suffix = sha256(str(selected["Spielschlüssel"]).encode("utf-8")).hexdigest()[:10]
+    st.markdown(
+        f"**Ausgewählt:** {selected['Mannschaft']} gegen {selected['Gegner']} "
+        f"am {kickoff:%d.%m.%Y um %H:%M Uhr}"
+    )
+    date_column, time_column = st.columns(2)
+    proposed_date = date_column.date_input(
+        "Neues Datum", value=kickoff.date(), key=f"move_date_{widget_suffix}"
+    )
+    proposed_time = time_column.time_input(
+        "Neue Anwurfzeit",
+        value=kickoff.time().replace(second=0, microsecond=0),
+        key=f"move_time_{widget_suffix}",
+        step=900,
+    )
+    if st.button(
+        "Verlegung gegen Regeln prüfen",
+        type="primary",
+        key=f"move_check_{widget_suffix}",
+    ):
+        proposed_schedule = reschedule_game(
+            schedule,
+            str(selected["Spielschlüssel"]),
+            proposed_date,
+            proposed_time,
+        )
+        baseline_legs = relevant_travel_legs(analysis_pairs, schedule)
+        proposed_legs = relevant_travel_legs(analysis_pairs, proposed_schedule)
+        all_legs = pd.concat([baseline_legs, proposed_legs], ignore_index=True).drop_duplicates(
+            subset=["Startschlüssel", "Zielschlüssel", "Abfahrt"]
+        )
+        with st.spinner("Der Verlegungstermin wird geprüft ..."):
+            travel_minutes, travel_stats = resolve_travel_times(all_legs)
+            baseline_bookings, _ = resolve_hall_bookings(schedule)
+            proposed_bookings, proposed_booking_error = resolve_hall_bookings(
+                proposed_schedule
+            )
+            baseline_findings = analyze_schedule(
+                schedule,
+                teams,
+                current_duration_map(),
+                analysis_pairs,
+                PRE_GAME_BUFFER_MINUTES,
+                travel_minutes,
+                baseline_bookings,
+            )
+            proposed_findings = analyze_schedule(
+                proposed_schedule,
+                teams,
+                current_duration_map(),
+                analysis_pairs,
+                PRE_GAME_BUFFER_MINUTES,
+                travel_minutes,
+                proposed_bookings,
+            )
+            new_findings, resolved_findings = compare_findings(
+                baseline_findings, proposed_findings
+            )
+        st.session_state["reschedule_check"] = {
+            "context_key": context_key,
+            "game_key": selected["Spielschlüssel"],
+            "kickoff": pd.Timestamp.combine(proposed_date, proposed_time),
+            "new": new_findings,
+            "resolved": resolved_findings,
+            "travel_stats": travel_stats,
+            "hall_booking_error": proposed_booking_error,
+        }
+
+    result = st.session_state.get("reschedule_check")
+    if (
+        not result
+        or result.get("context_key") != context_key
+        or result.get("game_key") != selected["Spielschlüssel"]
+    ):
+        return
+    st.markdown("#### Ergebnis der Terminprobe")
+    show_travel_status(result["travel_stats"])
+    if result["hall_booking_error"]:
+        st.warning(
+            "Die Hallenbuchung konnte für den vorgeschlagenen Termin nicht "
+            f"vollständig geprüft werden: {result['hall_booking_error']}"
+        )
+    if result["new"].empty:
+        st.success("Der vorgeschlagene Termin erzeugt keine neue Auffälligkeit.")
+    else:
+        st.error(
+            f"Der vorgeschlagene Termin erzeugt {len(result['new'])} neue "
+            "Auffälligkeit(en)."
+        )
+        show_findings_table(result["new"])
+    if not result["resolved"].empty:
+        with st.expander(
+            f"{len(result['resolved'])} dadurch gelöste Auffälligkeit(en)"
+        ):
+            show_findings_table(result["resolved"])
+
+
+def combined_schedule(main_frame: pd.DataFrame) -> pd.DataFrame:
+    parts = [main_frame]
+    if DEFAULT_DISTRICT_CSV.exists():
+        parts.append(load_schedule(DEFAULT_DISTRICT_CSV))
+    return pd.concat(parts, ignore_index=True).drop_duplicates(
+        subset=[
+            "Anwurf",
+            "Hallennummer",
+            "Spielnummer",
+            "Heimmannschaft",
+            "Gastmannschaft",
+        ],
+        keep="last",
+    )
+
+
+def version_label(version: ScheduleVersion) -> str:
+    return (
+        f"{local_timestamp(version.uploaded_at)} | {version.original_name} | "
+        f"{version.uploaded_by or 'unbekannt'}"
+    )
+
+
+def show_schedule_comparison() -> None:
+    st.subheader("Spielplanversionen vergleichen")
+    if schedule_store is None or active_schedule is None:
+        st.info("Für den Versionsvergleich werden mindestens zwei gespeicherte Uploads benötigt.")
+        return
+    try:
+        versions = schedule_store.list_versions(SEASON)
+    except Exception as exc:
+        st.warning(f"Die gespeicherten Spielplanversionen sind nicht erreichbar: {exc}")
+        return
+    candidates = [
+        version for version in versions if version.blob_name != active_schedule.blob_name
+    ]
+    if not candidates:
+        st.info("Es ist noch keine ältere Spielplanversion gespeichert.")
+        return
+
+    selected_version = st.selectbox(
+        "Vergleichsversion",
+        candidates,
+        format_func=version_label,
+    )
+    if st.button("Änderungen anzeigen"):
+        with st.spinner("Spielplanversionen werden verglichen ..."):
+            previous = schedule_store.load_version(selected_version)
+            previous_schedule = combined_schedule(load_schedule(BytesIO(previous.content)))
+            changes = compare_schedules(schedule, previous_schedule, teams)
+        st.session_state["schedule_comparison"] = {
+            "active_blob": active_schedule.blob_name,
+            "version": selected_version,
+            "changes": changes,
+        }
+
+    comparison = st.session_state.get("schedule_comparison")
+    if not comparison or comparison.get("active_blob") != active_schedule.blob_name:
+        return
+    changes = comparison["changes"]
+    if changes.empty:
+        st.success("Bei den relevanten Mannschaften wurden keine Änderungen gefunden.")
+        return
+    counts = changes["Status"].value_counts()
+    show_page_metrics(
+        [
+            ("Geändert", int(counts.get("Geändert", 0))),
+            ("Hinzugefügt", int(counts.get("Hinzugefügt", 0))),
+            ("Entfernt", int(counts.get("Entfernt", 0))),
+        ]
+    )
+    st.dataframe(
+        changes,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Status": st.column_config.TextColumn(width="small"),
+            "Spiel": st.column_config.TextColumn(width="large"),
+            "Änderung": st.column_config.TextColumn(width="medium"),
+            "Vorher": st.column_config.TextColumn(width="large"),
+            "Aktuell": st.column_config.TextColumn(width="large"),
+        },
+    )
+
+
 def show_analysis_page() -> None:
     st.header("Spielplanprüfung", help=ANALYSIS_HELP)
     show_core_metrics()
 
     _, saved_pairs, pair_error = load_saved_pairs()
+    with st.expander("Datenstände"):
+        st.dataframe(
+            data_status_frame(saved_pairs), hide_index=True, width="stretch"
+        )
+
     if pair_error:
         st.warning(
             "Gespeicherte Mannschaftspaare konnten nicht geladen werden. "
@@ -817,9 +1259,11 @@ def show_analysis_page() -> None:
             f"{skipped_pairs} ungültige Paarung(en) werden bei der Prüfung übersprungen."
         )
 
+    overview = relevant_schedule_overview(schedule, teams)
+    context_key = analysis_context_key(analysis_pairs)
     if st.button("Gesamten Spielplan prüfen", type="primary", width="stretch"):
         legs = relevant_travel_legs(analysis_pairs)
-        with st.spinner("Fahrzeiten und Hallenbuchungen werden geprüft …"):
+        with st.spinner("Fahrzeiten und Hallenbuchungen werden geprüft ..."):
             travel_minutes, travel_stats = resolve_travel_times(legs)
             hall_bookings, hall_booking_error = resolve_hall_bookings()
             findings = analyze_schedule(
@@ -831,38 +1275,21 @@ def show_analysis_page() -> None:
                 travel_minutes,
                 hall_bookings,
             )
-        show_travel_status(travel_stats)
-        if hall_booking_error:
-            st.warning(
-                f"Die Hallenbuchungsregel wurde nicht ausgewertet: "
-                f"{hall_booking_error}"
-            )
-        if findings.empty:
-            st.success("Die aktiven Regeln haben keine Auffälligkeiten gefunden.")
-        else:
-            st.error(f"{len(findings)} Auffälligkeit(en) gefunden.")
-            st.dataframe(
-                findings,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Priorität": st.column_config.TextColumn(width="small"),
-                    "Regel": st.column_config.TextColumn(width="medium"),
-                    "Datum": st.column_config.DateColumn(
-                        format="DD.MM.YYYY", width="small"
-                    ),
-                    "Spiele": st.column_config.TextColumn(width="large"),
-                    "Kommentar": st.column_config.TextColumn(width="large"),
-                },
-            )
-            st.download_button(
-                "Prüfung als CSV herunterladen",
-                findings.to_csv(index=False, sep=";").encode("utf-8-sig"),
-                "spielplan_pruefung.csv",
-                "text/csv",
-            )
-        if travel_stats["resolved"]:
-            show_azure_maps_attribution()
+        st.session_state["analysis_result"] = {
+            "context_key": context_key,
+            "findings": findings,
+            "travel_stats": travel_stats,
+            "hall_booking_error": hall_booking_error,
+        }
+
+    analysis_result = st.session_state.get("analysis_result")
+    if analysis_result and analysis_result.get("context_key") == context_key:
+        show_analysis_result(analysis_result, overview, saved_pairs)
+
+    st.divider()
+    show_reschedule_check(overview, analysis_pairs, context_key)
+    st.divider()
+    show_schedule_comparison()
 
     with st.expander("Enthaltene Mannschaften"):
         st.dataframe(
@@ -1796,19 +2223,7 @@ try:
     else:
         main_schedule = load_schedule(DEFAULT_CSV)
 
-    schedule_parts = [main_schedule]
-    if DEFAULT_DISTRICT_CSV.exists():
-        schedule_parts.append(load_schedule(DEFAULT_DISTRICT_CSV))
-    schedule = pd.concat(schedule_parts, ignore_index=True).drop_duplicates(
-        subset=[
-            "Anwurf",
-            "Hallennummer",
-            "Spielnummer",
-            "Heimmannschaft",
-            "Gastmannschaft",
-        ],
-        keep="last",
-    )
+    schedule = combined_schedule(main_schedule)
 except Exception as exc:
     st.error(f"Der Spielplan konnte nicht geladen werden: {exc}")
     st.stop()

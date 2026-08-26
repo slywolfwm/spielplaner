@@ -17,6 +17,16 @@ class StoredSchedule:
     content: bytes
     uploaded_at: datetime
     uploaded_by: str
+    sha256: str = ""
+
+
+@dataclass(frozen=True)
+class ScheduleVersion:
+    blob_name: str
+    original_name: str
+    uploaded_at: datetime
+    uploaded_by: str
+    sha256: str = ""
 
 
 class ScheduleStore:
@@ -66,9 +76,16 @@ class ScheduleStore:
             content=content,
             uploaded_at=now,
             uploaded_by=uploaded_by,
+            sha256=metadata["sha256"],
         )
 
     def latest_schedule(self, season: str) -> StoredSchedule | None:
+        versions = self.list_versions(season)
+        if not versions:
+            return None
+        return self.load_version(versions[0])
+
+    def list_versions(self, season: str) -> list[ScheduleVersion]:
         prefix = f"{_safe_segment(season)}/"
         blobs = list(
             self.container_client.list_blobs(
@@ -76,22 +93,35 @@ class ScheduleStore:
                 include=["metadata"],
             )
         )
-        if not blobs:
-            return None
-        latest = max(blobs, key=lambda blob: blob.last_modified)
-        metadata = latest.metadata or {}
-        uploaded_at = _as_datetime(
-            metadata.get("uploadedat") or latest.last_modified
-        )
+        versions = []
+        for blob in blobs:
+            metadata = blob.metadata or {}
+            versions.append(
+                ScheduleVersion(
+                    blob_name=str(blob.name),
+                    original_name=unquote(
+                        metadata.get("originalname", "Spielplan.csv")
+                    ),
+                    uploaded_at=_as_datetime(
+                        metadata.get("uploadedat") or blob.last_modified
+                    ),
+                    uploaded_by=unquote(metadata.get("uploadedby", "")),
+                    sha256=str(metadata.get("sha256", "")),
+                )
+            )
+        return sorted(versions, key=lambda version: version.uploaded_at, reverse=True)
+
+    def load_version(self, version: ScheduleVersion) -> StoredSchedule:
         content = self.container_client.get_blob_client(
-            latest.name
+            version.blob_name
         ).download_blob().readall()
         return StoredSchedule(
-            blob_name=str(latest.name),
-            original_name=unquote(metadata.get("originalname", "Spielplan.csv")),
+            blob_name=version.blob_name,
+            original_name=version.original_name,
             content=content,
-            uploaded_at=uploaded_at,
-            uploaded_by=unquote(metadata.get("uploadedby", "")),
+            uploaded_at=version.uploaded_at,
+            uploaded_by=version.uploaded_by,
+            sha256=version.sha256,
         )
 
 

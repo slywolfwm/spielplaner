@@ -33,6 +33,8 @@ def test_save_and_load_team_durations():
     assert durations["team-a"].extra_minutes == 10
     assert durations["team-b"].minutes == 60
     assert durations["team-b"].extra_minutes == 15
+    assert durations["team-a"].updated_by == "user-id"
+    assert durations["team-a"].updated_at
 
 
 def test_old_duration_leaves_stoppage_buffer_for_team_default():
@@ -48,3 +50,4 @@ def test_old_duration_leaves_stoppage_buffer_for_team_default():
     duration = DurationStore(table).list_durations("2026-27")["team-a"]
 
     assert duration.extra_minutes is None
+    assert duration.updated_at == ""

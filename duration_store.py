@@ -14,6 +14,8 @@ class StoredDuration:
     team_label: str
     minutes: int
     extra_minutes: int | None
+    updated_by: str = ""
+    updated_at: str = ""
 
 
 class DurationStore:
@@ -42,6 +44,8 @@ class DurationStore:
                     if "ExtraMinutes" in entity
                     else None
                 ),
+                updated_by=str(entity.get("UpdatedBy", "")),
+                updated_at=str(entity.get("UpdatedAt", "")),
             )
             for entity in entities
         }

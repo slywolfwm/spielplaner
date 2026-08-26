@@ -71,6 +71,14 @@ def test_schedule_upload_is_versioned_and_latest_keeps_metadata():
     assert latest.original_name == "Plan aktuell.csv"
     assert latest.content == b"second"
     assert latest.uploaded_by == "user-b"
+    assert latest.sha256
+
+    versions = store.list_versions("2026-27")
+    assert [version.original_name for version in versions] == [
+        "Plan aktuell.csv",
+        "Plan älter.csv",
+    ]
+    assert store.load_version(versions[1]).content == b"first"
 
 
 def test_empty_schedule_cannot_be_saved():
