@@ -1,11 +1,13 @@
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pandas as pd
 import pytest
 
 from omoc import BOOKING_COLUMNS, OmocError
-from omoc_refresh import BERLIN, nightly_window, refresh_hall_bookings
+from omoc_refresh import BERLIN, nightly_window, process_refresh_request, refresh_hall_bookings
 
 
 def test_nightly_start_is_stable_and_inside_the_berlin_window_on_clock_changes():
@@ -51,3 +53,25 @@ def test_failed_manual_refresh_leaves_the_previous_export_in_place():
         refresh_hall_bookings(store, client, "2026-27", "Bearbeiter")
     store.save_bookings.assert_not_called()
     store.acquire_refresh_lease.return_value.release.assert_called_once()
+
+
+def test_spieltagsplaner_request_publishes_export_before_acknowledgement():
+    store = Mock()
+    store.latest_bookings.return_value = None
+    client = Mock()
+    client.fetch_bookings.return_value = pd.DataFrame(columns=BOOKING_COLUMNS)
+    request_id = str(uuid4())
+    message = SimpleNamespace(content=request_id, inserted_on=datetime(2026, 11, 25, 12, tzinfo=timezone.utc))
+    blob = store.container_client.get_blob_client.return_value
+    queue = Mock()
+    queue.receive_messages.return_value = [message]
+
+    def acknowledge(received):
+        assert received == message
+        store.save_bookings.assert_called_once()
+        blob.upload_blob.assert_called_once_with(b"SUCCEEDED", overwrite=True)
+
+    queue.delete_message.side_effect = acknowledge
+    process_refresh_request(queue, store, client)
+    store.container_client.get_blob_client.assert_called_once_with(f"_refresh/{request_id}.status")
+    queue.delete_message.assert_called_once_with(message)

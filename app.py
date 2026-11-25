@@ -1883,12 +1883,6 @@ def show_omoc_refresh() -> None:
         st.caption("Für die Aktualisierung ist die Bearbeiterrolle erforderlich.")
 
 
-def show_administration_page() -> None:
-    st.header("Verwaltung")
-    st.subheader("Hallenbuchungen")
-    show_omoc_refresh()
-
-
 def show_hall_booking_page() -> None:
     st.header("Hallenbuchungen", help=HALL_BOOKING_HELP)
     show_core_metrics()
@@ -2184,12 +2178,6 @@ page = st.navigation(
             icon=":material/event_available:",
             url_path="hallenbuchungen",
         ),
-        *([st.Page(
-            show_administration_page,
-            title="Verwaltung",
-            icon=":material/settings:",
-            url_path="verwaltung",
-        )] if access.can_edit_pairings else []),
         st.Page(
             show_guide_page,
             title="Anleitung",

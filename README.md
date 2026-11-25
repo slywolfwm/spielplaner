@@ -169,9 +169,9 @@ az webapp config appsettings set --resource-group rg-spielplaner \
 ```
 
 Der OMOC-Abruf läuft täglich zu einer zufällig gewählten Minute zwischen 01:00
-und 05:00 Uhr (Europe/Berlin). Bearbeiter können unter **Verwaltung →
-Hallenbuchungen aus OMOC aktualisieren** jederzeit denselben Abruf starten.
-Beide Wege speichern den Stand der gesamten aktiven Saison vom 1. Juli bis zum
+und 05:00 Uhr (Europe/Berlin). Die Verwaltung des Spieltagsplaners kann
+denselben Abruf über die Azure-Queue `hall-booking-refresh` anfordern.
+Die Aktualisierung speichert den Stand der gesamten aktiven Saison vom 1. Juli bis zum
 30. Juni versioniert in Azure Blob Storage. Die Spielplanprüfung verwendet
 ausschließlich den neuesten gespeicherten Stand. In
 der Buchungsübersicht erscheinen nur Samstage, Sonntage und bayerische Feiertage.
