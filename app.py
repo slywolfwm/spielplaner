@@ -40,9 +40,10 @@ from analysis import (
 from booking_calendar import is_visible_booking_day
 from duration_store import DurationStore
 from excel_report import build_excel_report
-from hall_booking_store import HallBookingStore, StoredHallBookings
+from hall_booking_store import HallBookingRefreshInProgress, HallBookingStore, StoredHallBookings
 from manual_hall_bookings import bookings_from_editor
 from omoc import BOOKING_COLUMNS, OmocClient
+from omoc_refresh import SEASON, refresh_hall_bookings
 from pair_matrix import (
     TEAM_CATEGORY_ORDER,
     build_pair_matrix,
@@ -66,7 +67,6 @@ from travel_times import AzureMapsClient, AzureMapsError
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CSV = APP_DIR / "Regionsspielplan_Bayern_2026-27.csv"
 DEFAULT_DISTRICT_CSV = APP_DIR / "Vereinsspielplan_Alpenvorland_2026-27.csv"
-SEASON = "2026-27"
 PRE_GAME_BUFFER_MINUTES = 30
 MAX_RELEVANT_TRAVEL_GAP_MINUTES = 480
 DEFAULT_TRAVEL_SAFETY_PERCENT = 15
@@ -1825,21 +1825,11 @@ def manual_bookings_from_editor(
     )
 
 
-def show_hall_booking_page() -> None:
-    st.header("Hallenbuchungen", help=HALL_BOOKING_HELP)
-    show_core_metrics()
-
+def show_omoc_refresh() -> None:
     notice = st.session_state.pop("hall_booking_notice", "")
     if notice:
         st.success(notice)
 
-    period = relevant_hall_booking_period()
-    if period is None:
-        st.info("Im aktuellen Spielplan sind keine relevanten Heimspiele enthalten.")
-        return
-
-    date_from, date_to = period
-    omoc_period = relevant_hall_booking_period(OMOC_HALL_NUMBERS)
     if stored_hall_bookings is None:
         st.info("Es wurde noch kein Buchungsstand aus OMOC gespeichert.")
     else:
@@ -1861,32 +1851,27 @@ def show_hall_booking_page() -> None:
         access.can_edit_pairings
         and hall_booking_store is not None
         and omoc_client is not None
-        and omoc_period is not None
     )
-    if st.button(
+    clicked = st.button(
         "Hallenbuchungen aus OMOC aktualisieren",
         type="primary",
         disabled=not can_refresh,
-    ):
+    )
+    if clicked and can_refresh:
         try:
-            omoc_date_from, omoc_date_to = omoc_period
             with st.spinner("Hallenbuchungen werden aus OMOC geladen …"):
-                bookings = omoc_client.fetch_bookings(
-                    omoc_date_from, omoc_date_to
-                )
-                hall_booking_store.save_bookings(
-                    SEASON,
-                    bookings,
-                    omoc_date_from,
-                    omoc_date_to,
+                snapshot = refresh_hall_bookings(
+                    hall_booking_store, omoc_client, SEASON,
                     access.display_name or access.object_id,
                 )
             st.session_state["hall_booking_notice"] = (
-                f"{len(bookings)} Buchung(en) wurden aus OMOC aktualisiert."
+                f"{len(snapshot.bookings)} Buchung(en) wurden aus OMOC aktualisiert."
             )
             st.rerun()
-        except Exception as exc:
-            st.error(f"Die Hallenbuchungen konnten nicht aktualisiert werden: {exc}")
+        except HallBookingRefreshInProgress:
+            st.warning("Die Hallenbuchungen werden bereits aktualisiert.")
+        except Exception:
+            st.error("Die Hallenbuchungen konnten nicht aktualisiert werden.")
 
     if hall_booking_storage_error:
         st.warning("Azure Blob Storage ist für Hallenbuchungen nicht erreichbar.")
@@ -1896,6 +1881,24 @@ def show_hall_booking_page() -> None:
         st.warning("OMOC ist noch nicht konfiguriert.")
     elif not access.can_edit_pairings:
         st.caption("Für die Aktualisierung ist die Bearbeiterrolle erforderlich.")
+
+
+def show_administration_page() -> None:
+    st.header("Verwaltung")
+    st.subheader("Hallenbuchungen")
+    show_omoc_refresh()
+
+
+def show_hall_booking_page() -> None:
+    st.header("Hallenbuchungen", help=HALL_BOOKING_HELP)
+    show_core_metrics()
+    show_omoc_refresh()
+
+    period = relevant_hall_booking_period()
+    if period is None:
+        st.info("Im aktuellen Spielplan sind keine relevanten Heimspiele enthalten.")
+        return
+    date_from, date_to = period
 
     st.subheader("Buchungsübersicht")
     display_frames = []
@@ -2181,6 +2184,12 @@ page = st.navigation(
             icon=":material/event_available:",
             url_path="hallenbuchungen",
         ),
+        *([st.Page(
+            show_administration_page,
+            title="Verwaltung",
+            icon=":material/settings:",
+            url_path="verwaltung",
+        )] if access.can_edit_pairings else []),
         st.Page(
             show_guide_page,
             title="Anleitung",

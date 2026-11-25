@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import hashlib
@@ -7,11 +8,15 @@ import json
 import re
 from urllib.parse import quote, unquote
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import HttpResponseError, ResourceExistsError
 from azure.storage.blob import BlobServiceClient, ContentSettings
 import pandas as pd
 
 from omoc import BOOKING_COLUMNS
+
+
+class HallBookingRefreshInProgress(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,18 @@ class HallBookingStore:
     def latest_manual_bookings(self, season: str) -> StoredHallBookings | None:
         return self._latest_snapshot(f"manual/{_safe_segment(season)}/")
 
+    def acquire_refresh_lease(self):
+        lock = self.container_client.get_blob_client("_locks/omoc-refresh")
+        if not lock.exists():
+            with suppress(ResourceExistsError):
+                lock.upload_blob(b"", overwrite=False)
+        try:
+            return lock.acquire_lease(lease_duration=60)
+        except HttpResponseError as error:
+            if error.error_code == "LeaseAlreadyPresent":
+                raise HallBookingRefreshInProgress from error
+            raise
+
     def _latest_snapshot(self, prefix: str) -> StoredHallBookings | None:
         blobs = list(
             self.container_client.list_blobs(
@@ -125,7 +142,7 @@ class HallBookingStore:
         )
         if not blobs:
             return None
-        latest = max(blobs, key=lambda blob: blob.last_modified)
+        latest = max(blobs, key=lambda blob: (blob.last_modified, blob.name))
         metadata = latest.metadata or {}
         content = self.container_client.get_blob_client(
             latest.name

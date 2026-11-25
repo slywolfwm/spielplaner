@@ -168,10 +168,12 @@ az webapp config appsettings set --resource-group rg-spielplaner \
     OMOC_API_PASSWORD="HIER_NEUES_OMOC_KENNWORT"
 ```
 
-Die Seite **Hallenbuchungen** übernimmt den relevanten Buchungsstand auf Knopfdruck
-aus OMOC. Jeder Stand wird versioniert in Azure Blob Storage gespeichert und mit
-Aktualisierungszeitpunkt und angemeldetem Bearbeiter versehen. Die
-Spielplanprüfung verwendet ausschließlich den neuesten gespeicherten Stand. In
+Der OMOC-Abruf läuft täglich zu einer zufällig gewählten Minute zwischen 01:00
+und 05:00 Uhr (Europe/Berlin). Bearbeiter können unter **Verwaltung →
+Hallenbuchungen aus OMOC aktualisieren** jederzeit denselben Abruf starten.
+Beide Wege speichern den Stand der gesamten aktiven Saison vom 1. Juli bis zum
+30. Juni versioniert in Azure Blob Storage. Die Spielplanprüfung verwendet
+ausschließlich den neuesten gespeicherten Stand. In
 der Buchungsübersicht erscheinen nur Samstage, Sonntage und bayerische Feiertage.
 Eine Buchung an einem Werktag wird zusätzlich angezeigt und kann gespeichert
 werden, wenn der Spielplan an diesem Tag ein Spiel in derselben Halle enthält.

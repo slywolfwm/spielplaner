@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-python -m streamlit run app.py \
+python -m omoc_refresh &
+exec python -m streamlit run app.py \
   --server.address 0.0.0.0 \
   --server.port 8000 \
   --server.headless true
